@@ -44,7 +44,7 @@ def update_item_price_for_woocommerce_item_from_hook(doc, method):
 
 @frappe.whitelist()
 def run_item_price_sync_in_background():
-	frappe.enqueue(run_item_price_sync, queue="long", timeout=3600)
+	frappe.enqueue(run_item_price_sync, queue="long", timeout=7200)
 
 
 @frappe.whitelist()

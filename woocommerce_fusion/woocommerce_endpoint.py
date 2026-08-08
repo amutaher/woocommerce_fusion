@@ -17,21 +17,39 @@ from woocommerce_fusion.woocommerce.woocommerce_api import (
 
 def validate_request() -> tuple[bool, HTTPStatus | None, str | None]:
 	# Get relevant WooCommerce Server
+	webhook_source_url = frappe.get_request_header("x-wc-webhook-source", "")
+	if not webhook_source_url:
+		return False, HTTPStatus.BAD_REQUEST, _("Missing Header: x-wc-webhook-source")
+
 	try:
-		webhook_source_url = frappe.get_request_header("x-wc-webhook-source", "")
 		wc_server = frappe.get_doc("WooCommerce Server", parse_domain_from_url(webhook_source_url))
 	except Exception:
-		return False, HTTPStatus.BAD_REQUEST, _("Missing Header")
+		# parse_domain_from_url may raise if header is malformed
+		frappe.log_error(f"Invalid webhook source header: {webhook_source_url}", "WooCommerce Webhook")
+		return False, HTTPStatus.BAD_REQUEST, _("Invalid webhook source")
 
-	# Validate secret
-	_sig = base64.b64encode(
-		hmac.new(wc_server.secret.encode("utf8"), frappe.request.data, hashlib.sha256).digest()
-	)
-	# if (
-	# 	frappe.request.data
-	# 	and not sig == frappe.get_request_header("x-wc-webhook-signature", "").encode()
-	# ):
-	# 	return False, HTTPStatus.UNAUTHORIZED, _("Unauthorized")
+	# Validate secret / signature
+	received_sig = frappe.get_request_header("x-wc-webhook-signature", "")
+	if not received_sig:
+		return False, HTTPStatus.BAD_REQUEST, _("Missing Header: x-wc-webhook-signature")
+
+	# request.data is usually bytes; ensure we use bytes for HMAC
+	body = frappe.request.data or b""
+	if isinstance(body, str):
+		body = body.encode("utf8")
+
+	expected_sig = base64.b64encode(
+		hmac.new(wc_server.secret.encode("utf8"), body, hashlib.sha256).digest()
+	).decode("utf8")
+
+	# Use compare_digest for timing-attack-resistant comparison
+	if not hmac.compare_digest(expected_sig, received_sig.strip()):
+		# Log details for debugging (do NOT log secrets in production)
+		frappe.log_error(
+			f"WooCommerce webhook signature mismatch. expected={expected_sig} received={received_sig}",
+			"WooCommerce Webhook Signature"
+		)
+		return False, HTTPStatus.UNAUTHORIZED, _("Unauthorized")
 
 	frappe.set_user(wc_server.creation_user)  # nosemgrep
 	return True, None, None
