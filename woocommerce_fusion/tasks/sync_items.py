@@ -140,6 +140,114 @@ class ERPNextItemToSync:
 	def item_woocommerce_server(self):
 		return self.item.woocommerce_servers[self.item_woocommerce_server_idx - 1]
 
+def _serialized_item_sync(method):
+	"""
+	Serialize WooCommerce synchronization per ERPNext Item.
+
+	Multiple WooCommerce Server jobs may synchronize the same Item at the
+	same time. Each queued job may contain an older Item document and can
+	therefore raise TimestampMismatchError when saving.
+
+	This wrapper:
+	- uses one lock per ERPNext Item;
+	- reloads the latest Item inside the lock;
+	- finds the WooCommerce Server row again;
+	- then executes the existing SynchroniseItem.run().
+	"""
+	from functools import wraps
+
+	@wraps(method)
+	def wrapper(self, *args, **kwargs):
+		# A WooCommerce-originated sync may start without self.item.
+		# Resolve the linked ERPNext Item first.
+		if not self.item and self.woocommerce_product:
+			self.get_corresponding_item_or_product()
+
+		if self.item:
+			item_code = self.item.item.name
+
+			woocommerce_server = (
+				self.item.item_woocommerce_server.woocommerce_server
+			)
+
+			lock_name = (
+				f"woocommerce_fusion:item_sync:"
+				f"{frappe.local.site}:{item_code}"
+			)
+
+			with frappe.cache.lock(
+				lock_name,
+				timeout=900,
+			):
+				# Important:
+				# discard the potentially stale Item object carried
+				# by the background job.
+				fresh_item = frappe.get_doc(
+					"Item",
+					item_code,
+				)
+
+				fresh_server_row = next(
+					(
+						row
+						for row in fresh_item.woocommerce_servers
+						if row.woocommerce_server
+						== woocommerce_server
+					),
+					None,
+				)
+
+				if not fresh_server_row:
+					frappe.throw(
+						_(
+							"WooCommerce Server {0} is no longer "
+							"linked to Item {1}."
+						).format(
+							woocommerce_server,
+							item_code,
+						)
+					)
+
+				self.item = ERPNextItemToSync(
+					item=fresh_item,
+					item_woocommerce_server_idx=(
+						fresh_server_row.idx
+					),
+				)
+
+				return method(
+					self,
+					*args,
+					**kwargs,
+				)
+
+		# If this is a WooCommerce product that does not yet have
+		# an ERPNext Item, protect creation using the remote identity.
+		if self.woocommerce_product:
+			lock_name = (
+				f"woocommerce_fusion:item_sync:new:"
+				f"{frappe.local.site}:"
+				f"{self.woocommerce_product.woocommerce_server}:"
+				f"{self.woocommerce_product.woocommerce_id}"
+			)
+
+			with frappe.cache.lock(
+				lock_name,
+				timeout=900,
+			):
+				return method(
+					self,
+					*args,
+					**kwargs,
+				)
+
+		return method(
+			self,
+			*args,
+			**kwargs,
+		)
+
+	return wrapper
 
 class SynchroniseItem(SynchroniseWooCommerce):
 	"""
@@ -157,6 +265,7 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		self.woocommerce_product = woocommerce_product
 		self.settings = frappe.get_cached_doc("WooCommerce Integration Settings")
 
+	@_serialized_item_sync
 	def run(self):
 		"""
 		Run synchronisation
@@ -285,27 +394,223 @@ class SynchroniseItem(SynchroniseWooCommerce):
 
 		self.set_sync_hash()
 
-	def update_woocommerce_product(self, wc_product: WooCommerceProduct, item: ERPNextItemToSync) -> None:
+	def update_woocommerce_product(
+		self,
+		wc_product: WooCommerceProduct,
+		item: ERPNextItemToSync,
+	) -> None:
 		"""
-		Update the WooCommerce Product with fields from it's corresponding ERPNext Item
+		Update WooCommerce Product from ERPNext Item.
+	
+		If WooCommerce changes the same product between load and save
+		(for example through stock or price synchronization), reload the
+		latest WooCommerce resource and safely retry the update.
 		"""
-		wc_product_dirty = False
+	
+		product_name = wc_product.name
+		max_attempts = 3
+	
+		for attempt in range(max_attempts):
+		
+			# After a TimestampMismatchError, discard the stale virtual
+			# document completely and load the newest WooCommerce resource.
+			if attempt > 0:
+				wc_product = frappe.get_doc(
+					"WooCommerce Product",
+					product_name,
+				)
+	
+			wc_product_dirty = False
+	
+			# Apply Item name.
+			if wc_product.woocommerce_name != item.item.item_name:
+				wc_product.woocommerce_name = item.item.item_name
+				wc_product_dirty = True
+	
+			# Re-apply all ERPNext -> WooCommerce mapped fields
+			# against the freshly loaded WooCommerce resource.
+			product_fields_changed, wc_product = (
+				self.set_product_fields(
+					wc_product,
+					item,
+				)
+			)
+	
+			if product_fields_changed:
+				wc_product_dirty = True
+	
+			if not wc_product_dirty:
+				self.woocommerce_product = wc_product
+				self.set_sync_hash()
+				return
+	
+			try:
+				wc_product.save()
+	
+			except frappe.TimestampMismatchError:
+				# save() adds the document to currently_saving before
+				# check_if_latest(). Since the save failed, clean that
+				# request-level state before retrying.
+				saving_key = (
+					wc_product.doctype,
+					wc_product.name,
+				)
+	
+				if saving_key in frappe.flags.currently_saving:
+					frappe.flags.currently_saving.remove(
+						saving_key
+					)
+	
+				frappe.clear_last_message()
+	
+				if attempt == max_attempts - 1:
+					raise
+	
+				# Retry using a completely fresh WooCommerce Product.
+				continue
+	
+			# Successful save.
+			self.woocommerce_product = wc_product
+			self.set_sync_hash()
+			return
 
-		# Update properties
-		if wc_product.woocommerce_name != item.item.item_name:
-			wc_product.woocommerce_name = item.item.item_name
-			wc_product_dirty = True
 
-		product_fields_changed, wc_product = self.set_product_fields(wc_product, item)
-		if product_fields_changed:
-			wc_product_dirty = True
+	def get_parent_woocommerce_product_for_server(
+		self,
+		item: ERPNextItemToSync,
+	) -> tuple[Item, WooCommerceProduct]:
+		"""
+		Get the variant parent WooCommerce Product from the same WooCommerce Server.
 
-		if wc_product_dirty:
-			wc_product.save()
+		The ERPNext template Item code must never be assumed to be the WooCommerce
+		parent Product ID. The parent ID is always read from the template Item's
+		WooCommerce Server row matching the current variant's server.
 
-		self.woocommerce_product = wc_product
-		self.set_sync_hash()
+		If the template has not yet been created on that server, synchronise only
+		that template/server row first.
+		"""
+		if not item.item.variant_of:
+			frappe.throw(
+				_("Item {0} is not a variant.").format(
+					item.item.name
+				)
+			)
 
+		woocommerce_server = (
+			item.item_woocommerce_server.woocommerce_server
+		)
+
+		parent_item = frappe.get_doc(
+			"Item",
+			item.item.variant_of,
+		)
+
+		parent_server_row = next(
+			(
+				row
+				for row in parent_item.woocommerce_servers
+				if row.woocommerce_server == woocommerce_server
+			),
+			None,
+		)
+
+		if not parent_server_row:
+			frappe.throw(
+				_(
+					"Template Item {0} is not linked to WooCommerce "
+					"Server {1}. Add the same WooCommerce Server to "
+					"the template before synchronising variant {2}."
+				).format(
+					parent_item.name,
+					woocommerce_server,
+					item.item.name,
+				)
+			)
+
+		if not parent_server_row.enabled:
+			frappe.throw(
+				_(
+					"WooCommerce synchronization is disabled for "
+					"Template Item {0} on server {1}."
+				).format(
+					parent_item.name,
+					woocommerce_server,
+				)
+			)
+
+		# The template may have just been created in ERPNext while its
+		# background WooCommerce synchronization has not completed yet.
+		# Synchronise only the template row for this same server.
+		if not parent_server_row.woocommerce_id:
+			parent_sync = SynchroniseItem(
+				item=ERPNextItemToSync(
+					item=parent_item,
+					item_woocommerce_server_idx=(
+						parent_server_row.idx
+					),
+				)
+			)
+			parent_sync.run()
+
+			# Reload the template because parent_sync writes the WC ID
+			# back to the Item WooCommerce Server child row.
+			parent_item = frappe.get_doc(
+				"Item",
+				item.item.variant_of,
+			)
+
+			parent_server_row = next(
+				(
+					row
+					for row in parent_item.woocommerce_servers
+					if row.woocommerce_server
+					== woocommerce_server
+				),
+				None,
+			)
+
+		if (
+			not parent_server_row
+			or not parent_server_row.woocommerce_id
+		):
+			frappe.throw(
+				_(
+					"Template Item {0} does not have a WooCommerce "
+					"Product ID on server {1}."
+				).format(
+					parent_item.name,
+					woocommerce_server,
+				)
+			)
+
+		parent_product_name = (
+			generate_woocommerce_record_name_from_domain_and_id(
+				woocommerce_server,
+				parent_server_row.woocommerce_id,
+			)
+		)
+
+		# Load the exact parent from the exact WooCommerce Server.
+		# This also verifies that the stored WooCommerce ID really exists.
+		parent_wc_product = frappe.get_doc(
+			"WooCommerce Product",
+			parent_product_name,
+		)
+
+		if parent_wc_product.type != "variable":
+			frappe.throw(
+				_(
+					"WooCommerce Product {0} on server {1} is type "
+					"'{2}', but a variant requires a variable "
+					"parent product."
+				).format(
+					parent_server_row.woocommerce_id,
+					woocommerce_server,
+					parent_wc_product.type,
+				)
+			)
+
+		return parent_item, parent_wc_product
 	def create_woocommerce_product(self, item: ERPNextItemToSync) -> None:
 		"""
 		Create the WooCommerce Product with fields from it's corresponding ERPNext Item
@@ -319,6 +624,7 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			wc_product = frappe.get_doc({"doctype": "WooCommerce Product"})
 
 			wc_product.type = "simple"
+			wc_product.manage_stock = item.item.is_stock_item
 
 			# Handle variants
 			if item.item.has_variants:
@@ -343,9 +649,11 @@ class SynchroniseItem(SynchroniseWooCommerce):
 				wc_product.attributes = json.dumps(wc_product_attributes)
 
 			if item.item.variant_of:
-				# Check if parent exists
-				parent_item = frappe.get_doc("Item", item.item.variant_of)
-				parent_item, parent_wc_product = run_item_sync(item_code=parent_item.item_code)
+				# Resolve the parent WooCommerce Product from the SAME
+				# WooCommerce Server as the current variant.
+				parent_item, parent_wc_product = (
+					self.get_parent_woocommerce_product_for_server(item)
+				)
 				wc_product.parent_id = parent_wc_product.woocommerce_id
 				wc_product.type = "variation"
 

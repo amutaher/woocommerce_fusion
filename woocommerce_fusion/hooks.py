@@ -117,20 +117,49 @@ doc_events = {
 		"on_cancel": "woocommerce_fusion.tasks.stock_update.update_stock_levels_for_woocommerce_item",
 	},
 	"Sales Invoice": {
-		"on_submit": "woocommerce_fusion.tasks.stock_update.update_stock_levels_for_woocommerce_item",
-		"on_cancel": "woocommerce_fusion.tasks.stock_update.update_stock_levels_for_woocommerce_item",
+		"on_submit": [
+			"woocommerce_fusion.tasks.stock_update.update_stock_levels_for_woocommerce_item",
+			"woocommerce_fusion.tasks.order_enhancements.queue_refund_from_sales_invoice",
+		],
+		"on_cancel": [
+			"woocommerce_fusion.tasks.stock_update.update_stock_levels_for_woocommerce_item",
+			"woocommerce_fusion.tasks.order_enhancements.queue_refund_from_sales_invoice",
+		],
 	},
 	"Delivery Note": {
-		"on_submit": "woocommerce_fusion.tasks.stock_update.update_stock_levels_for_woocommerce_item",
-		"on_cancel": "woocommerce_fusion.tasks.stock_update.update_stock_levels_for_woocommerce_item",
+		"on_submit": [
+			"woocommerce_fusion.tasks.stock_update.update_stock_levels_for_woocommerce_item",
+			"woocommerce_fusion.tasks.order_enhancements.queue_reconciliation_from_delivery_note",
+		],
+		"on_cancel": [
+			"woocommerce_fusion.tasks.stock_update.update_stock_levels_for_woocommerce_item",
+			"woocommerce_fusion.tasks.order_enhancements.queue_reconciliation_from_delivery_note",
+		],
 	},
 	"Item Price": {
 		"on_update": "woocommerce_fusion.tasks.sync_item_prices.update_item_price_for_woocommerce_item_from_hook"
 	},
-	"Sales Order": {"on_submit": "woocommerce_fusion.tasks.sync_sales_orders.run_sales_order_sync_from_hook"},
+	"Sales Order": {
+		"on_submit": [
+			"woocommerce_fusion.tasks.order_enhancements.create_sales_invoice_on_sales_order_submit",
+			"woocommerce_fusion.tasks.sync_sales_orders.run_sales_order_sync_from_hook",
+		],
+		"on_change": "woocommerce_fusion.tasks.order_enhancements.queue_refund_from_sales_order",
+	},
 	"Item": {
 		"on_update": "woocommerce_fusion.tasks.sync_items.run_item_sync_from_hook",
 		"after_insert": "woocommerce_fusion.tasks.sync_items.run_item_sync_from_hook",
+	},
+    "WooCommerce Server": {
+		"validate": "woocommerce_fusion.tasks.order_enhancements.validate_woocommerce_server_settings",
+	},
+    "Purchase Invoice": {
+		"on_submit": "woocommerce_fusion.tasks.stock_update.update_stock_levels_for_woocommerce_item",
+		"on_cancel": "woocommerce_fusion.tasks.stock_update.update_stock_levels_for_woocommerce_item",
+	},
+    "Purchase Receipt": {
+		"on_submit": "woocommerce_fusion.tasks.stock_update.update_stock_levels_for_woocommerce_item",
+		"on_cancel": "woocommerce_fusion.tasks.stock_update.update_stock_levels_for_woocommerce_item",
 	},
 }
 
@@ -251,6 +280,14 @@ fixtures = [
 					"Address-woocommerce_identifier",
 					"Item-woocommerce_servers",
 					"Item-custom_woocommerce_tab",
+                    "WooCommerce Server-custom_create_sales_invoice",
+                    "WooCommerce Server-custom_submit_sales_invoice",
+                    "Sales Order Item-custom_woocommerce_order_line_id",
+                    "Sales Order Item-custom_woocommerce_refunded_qty",
+                    "Sales Order Item-custom_woocommerce_refunded_amount",
+                    "Sales Order Item-custom_woocommerce_last_refund_id",
+                    "WooCommerce Server-custom_refund_qty_from_return_sales_invoice",
+                    "WooCommerce Server-custom_reduce_bin_reserved_qty_on_financial_return",
 				),
 			]
 		],

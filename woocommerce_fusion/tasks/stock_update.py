@@ -9,7 +9,7 @@ verify_ssl = not frappe._dev_server
 
 def update_stock_levels_for_woocommerce_item(doc, method):
 	if not frappe.flags.in_test:
-		if doc.doctype in ("Stock Entry", "Stock Reconciliation", "Sales Invoice", "Delivery Note"):
+		if doc.doctype in ("Stock Entry", "Stock Reconciliation", "Sales Invoice", "Delivery Note", "Purchase Invoice", "Purchase Receipt"):
 			# Check if there are any enabled WooCommerce Servers with stock sync enabled
 			if (
 				len(
@@ -20,7 +20,7 @@ def update_stock_levels_for_woocommerce_item(doc, method):
 				)
 				> 0
 			):
-				if doc.doctype == "Sales Invoice":
+				if doc.doctype == "Sales Invoice" or doc.doctype == "Purchase Invoice":
 					if doc.update_stock == 0:
 						return
 				item_codes = [row.item_code for row in doc.items]

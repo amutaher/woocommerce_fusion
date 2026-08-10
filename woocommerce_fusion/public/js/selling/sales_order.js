@@ -33,6 +33,20 @@ frappe.ui.form.on("Sales Order", {
       );
     }
 
+    // Recalculate returns/reserved stock and check WooCommerce sync.
+    if (
+      frm.doc.docstatus === 1 &&
+      frm.doc.woocommerce_id &&
+      frm.doc.woocommerce_server
+    ) {
+      frm.add_custom_button(
+        __("Recalculate Returns & Sync WooCommerce"),
+        function () {
+          frm.trigger("reconcile_returns_and_sync");
+        },
+        __("Actions"),
+      );
+    }
     // Add a custom button to allow adding or editing Shipment Trackings
     if (frm.doc.woocommerce_id) {
       frm.add_custom_button(
@@ -91,6 +105,50 @@ frappe.ui.form.on("Sales Order", {
     });
   },
 
+  reconcile_returns_and_sync: function (frm) {
+    frappe.dom.freeze(
+      __("Recalculating returns and checking WooCommerce..."),
+    );
+
+    frappe.call({
+      method:
+        "woocommerce_fusion.tasks.order_enhancements." +
+        "reconcile_sales_order_and_sync",
+      args: {
+        sales_order_name: frm.doc.name,
+      },
+      callback: function (r) {
+        frappe.dom.unfreeze();
+
+        const result = r.message || {};
+        const changedRows = (result.changed_rows || []).length;
+        const stockItems = (result.stock_items_queued || []).length;
+
+        frappe.msgprint({
+          title: __("WooCommerce Reconciliation"),
+          indicator: result.skipped ? "orange" : "green",
+          message: result.skipped
+            ? __(result.reason || "No action was required.")
+            : __(
+                "Reconciliation completed.<br>" +
+                  "Returned quantity rows updated: {0}<br>" +
+                  "Stock items queued: {1}<br>" +
+                  "Refund queued: {2}",
+                [
+                  changedRows,
+                  stockItems,
+                  result.refund_queued ? __("Yes") : __("No"),
+                ],
+              ),
+        });
+
+        frm.reload_doc();
+      },
+      error: function () {
+        frappe.dom.unfreeze();
+      },
+    });
+  },
   woocommerce_status: function (frm) {
     // Triggered when woocommerce_status is changed
     frappe.confirm(
