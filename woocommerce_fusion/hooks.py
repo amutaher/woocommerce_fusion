@@ -94,6 +94,7 @@ doctype_list_js = {"Sales Order": "public/js/selling/sales_order_list.js"}
 
 override_doctype_class = {
 	"Sales Order": "woocommerce_fusion.overrides.selling.sales_order.CustomSalesOrder",
+    "Item": "woocommerce_fusion.overrides.stock.item.CustomItem",
 }
 
 # Document Events
@@ -196,6 +197,9 @@ before_tests = "woocommerce_fusion.utils.before_tests"
 #
 # override_whitelisted_methods = {
 # }
+override_whitelisted_methods = {
+    "erpnext.selling.doctype.sales_order.sales_order.make_delivery_note": "woocommerce_fusion.overrides.selling.sales_order.make_delivery_note"
+}
 #
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,

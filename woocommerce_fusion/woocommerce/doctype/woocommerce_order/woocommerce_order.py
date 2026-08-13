@@ -174,10 +174,8 @@ class WooCommerceOrder(WooCommerceResource):
 		# Parse the server domain and order_id from the Document name
 		wc_server_domain, order_id = get_domain_and_id_from_woocommerce_record_name(self.name)
 
-		# Select the relevant WooCommerce server
-		self.current_wc_api = next(
-			(api for api in self.wc_api_list if wc_server_domain in api.woocommerce_server_url), None
-		)
+		# Select the exact WooCommerce Server encoded in the document name.
+		self.current_wc_api = self.get_wc_api_for_domain(wc_server_domain)
 
 		if self.current_wc_api.wc_plugin_advanced_shipment_tracking and self.shipment_trackings:
 			# Verify if the 'shipment_trackings' field changed

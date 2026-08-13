@@ -1,6 +1,7 @@
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from urllib.parse import unquote
 
 import frappe
 from erpnext.stock.doctype.item.item import Item
@@ -20,6 +21,7 @@ from woocommerce_fusion.woocommerce.doctype.woocommerce_server.woocommerce_serve
 )
 from woocommerce_fusion.woocommerce.woocommerce_api import (
 	generate_woocommerce_record_name_from_domain_and_id,
+	log_and_raise_error,
 )
 
 
@@ -265,6 +267,12 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		self.woocommerce_product = woocommerce_product
 		self.settings = frappe.get_cached_doc("WooCommerce Integration Settings")
 
+		# Per-sync caches for WooCommerce global attribute metadata/terms.
+		# Attribute IDs are server-specific and must never be reused between stores.
+		self._wc_api_cache = {}
+		self._wc_global_attributes_cache = {}
+		self._wc_global_terms_cache = {}
+
 	@_serialized_item_sync
 	def run(self):
 		"""
@@ -475,6 +483,759 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			return
 
 
+
+	def _normalise_attribute_key(self, value) -> str:
+		"""
+		Normalise ERPNext/WooCommerce attribute names for matching only.
+
+		This does not modify the value sent to WooCommerce. It lets names such as
+		"pa_color", "Color", "color", or URL-decoded Unicode slugs be compared
+		safely while preserving the original display name.
+		"""
+		value = unquote(str(value or "")).strip().casefold()
+
+		if value.startswith("pa_"):
+			value = value[3:]
+
+		value = value.replace("_", " ").replace("-", " ")
+		return " ".join(value.split())
+
+	def _get_wc_api_for_server(self, woocommerce_server: str):
+		if woocommerce_server in self._wc_api_cache:
+			return self._wc_api_cache[woocommerce_server]
+
+		wc_api = next(
+			(
+				api
+				for api in WooCommerceProduct._init_api()
+				if api.woocommerce_server == woocommerce_server
+			),
+			None,
+		)
+
+		if not wc_api:
+			frappe.throw(
+				_(
+					"No enabled WooCommerce API is available for "
+					"server {0}."
+				).format(woocommerce_server)
+			)
+
+		self._wc_api_cache[woocommerce_server] = wc_api
+		return wc_api
+
+	def _get_all_wc_records(
+		self,
+		woocommerce_server: str,
+		endpoint: str,
+	) -> list[dict]:
+		"""Fetch all REST records from a paginated WooCommerce endpoint."""
+		wc_api = self._get_wc_api_for_server(woocommerce_server)
+		records = []
+		page = 1
+		per_page = 100
+
+		while True:
+			response = wc_api.api.get(
+				endpoint,
+				params={
+					"per_page": per_page,
+					"page": page,
+				},
+			)
+
+			if response.status_code != 200:
+				log_and_raise_error(
+					error_text=(
+						f"Unable to read WooCommerce endpoint "
+						f"{endpoint} on {woocommerce_server}"
+					),
+					response=response,
+				)
+
+			page_records = response.json()
+			if not isinstance(page_records, list):
+				frappe.throw(
+					_(
+						"Unexpected WooCommerce response from {0} "
+						"on server {1}."
+					).format(
+						endpoint,
+						woocommerce_server,
+					)
+				)
+
+			records.extend(page_records)
+
+			total_pages = int(
+				response.headers.get("X-WP-TotalPages") or 0
+			)
+
+			if (
+				(total_pages and page >= total_pages)
+				or len(page_records) < per_page
+			):
+				break
+
+			page += 1
+
+		return records
+
+	def get_global_woocommerce_attributes(
+		self,
+		woocommerce_server: str,
+	) -> list[dict]:
+		"""Return global WooCommerce attributes for exactly one server."""
+		if woocommerce_server not in self._wc_global_attributes_cache:
+			self._wc_global_attributes_cache[woocommerce_server] = (
+				self._get_all_wc_records(
+					woocommerce_server,
+					"products/attributes",
+				)
+			)
+
+		return self._wc_global_attributes_cache[
+			woocommerce_server
+		]
+
+	def find_global_woocommerce_attribute(
+		self,
+		woocommerce_server: str,
+		erpnext_attribute_name: str,
+	) -> dict | None:
+		"""
+		Match an ERPNext Item Attribute to a WooCommerce global attribute.
+
+		Name is preferred. Slug is a fallback. Attribute IDs are never shared
+		between WooCommerce Servers.
+		"""
+		target = self._normalise_attribute_key(
+			erpnext_attribute_name
+		)
+
+		name_matches = []
+		slug_matches = []
+
+		for wc_attribute in self.get_global_woocommerce_attributes(
+			woocommerce_server
+		):
+			if (
+				self._normalise_attribute_key(
+					wc_attribute.get("name")
+				)
+				== target
+			):
+				name_matches.append(wc_attribute)
+			elif (
+				self._normalise_attribute_key(
+					wc_attribute.get("slug")
+				)
+				== target
+			):
+				slug_matches.append(wc_attribute)
+
+		matches = name_matches or slug_matches
+
+		if len(matches) > 1:
+			frappe.throw(
+				_(
+					"More than one WooCommerce global attribute "
+					"matches ERPNext Item Attribute {0} on server {1}."
+				).format(
+					erpnext_attribute_name,
+					woocommerce_server,
+				)
+			)
+
+		return matches[0] if matches else None
+
+	def ensure_global_woocommerce_attribute_terms(
+		self,
+		woocommerce_server: str,
+		attribute_id: int,
+		values: list[str],
+	) -> None:
+		"""Create missing term names for a matched global WooCommerce attribute."""
+		cache_key = (
+			woocommerce_server,
+			int(attribute_id),
+		)
+
+		if cache_key not in self._wc_global_terms_cache:
+			terms = self._get_all_wc_records(
+				woocommerce_server,
+				f"products/attributes/{attribute_id}/terms",
+			)
+			self._wc_global_terms_cache[cache_key] = {
+				self._normalise_attribute_key(
+					term.get("name")
+				): term
+				for term in terms
+				if term.get("name")
+			}
+
+		terms_by_key = self._wc_global_terms_cache[
+			cache_key
+		]
+		wc_api = self._get_wc_api_for_server(
+			woocommerce_server
+		)
+
+		for value in values:
+			value = str(value or "").strip()
+			if not value:
+				continue
+
+			key = self._normalise_attribute_key(value)
+			if key in terms_by_key:
+				continue
+
+			response = wc_api.api.post(
+				f"products/attributes/{attribute_id}/terms",
+				data={"name": value},
+			)
+
+			if response.status_code not in (200, 201):
+				response_data = response.json()
+				error_code = (
+					response_data.get("code")
+					if isinstance(response_data, dict)
+					else ""
+				)
+
+				# Another concurrent variant job may have created the same term
+				# after our initial GET. Treat a term-exists race as success.
+				if "term_exists" not in str(error_code):
+					log_and_raise_error(
+						error_text=(
+							"Unable to create WooCommerce attribute "
+							f"term {value} for attribute {attribute_id} "
+							f"on {woocommerce_server}"
+						),
+						response=response,
+					)
+
+			terms_by_key[key] = {
+				"name": value,
+			}
+
+	def build_woocommerce_attributes_from_erpnext(
+		self,
+		item: ERPNextItemToSync,
+		variation: bool = False,
+	) -> list[dict]:
+		"""
+		Build WooCommerce attributes using the correct global/local model.
+
+		Global WooCommerce attribute:
+		    parent/template -> {"id": ..., "options": [...]}
+		    variation       -> {"id": ..., "option": ...}
+
+		Local/product-specific attribute:
+		    parent/template -> {"name": ..., "options": [...]}
+		    variation       -> {"name": ..., "option": ...}
+		"""
+		woocommerce_server = (
+			item.item_woocommerce_server.woocommerce_server
+		)
+		result = []
+
+		for row in item.item.attributes:
+			item_attribute = frappe.get_doc(
+				"Item Attribute",
+				row.attribute,
+			)
+			attribute_name = (
+				item_attribute.attribute_name
+				or item_attribute.name
+			)
+
+			global_attribute = (
+				self.find_global_woocommerce_attribute(
+					woocommerce_server,
+					attribute_name,
+				)
+			)
+
+			if variation:
+				option = str(
+					row.attribute_value or ""
+				).strip()
+
+				if global_attribute:
+					self.ensure_global_woocommerce_attribute_terms(
+						woocommerce_server,
+						global_attribute["id"],
+						[option],
+					)
+					result.append(
+						{
+							"id": int(
+								global_attribute["id"]
+							),
+							"option": option,
+						}
+					)
+				else:
+					result.append(
+						{
+							"name": attribute_name,
+							"option": option,
+						}
+					)
+
+				continue
+
+			options = [
+				str(option.attribute_value or "").strip()
+				for option in item_attribute.item_attribute_values
+				if str(option.attribute_value or "").strip()
+			]
+
+			if global_attribute:
+				self.ensure_global_woocommerce_attribute_terms(
+					woocommerce_server,
+					global_attribute["id"],
+					options,
+				)
+				result.append(
+					{
+						"id": int(global_attribute["id"]),
+						"visible": True,
+						"variation": True,
+						"options": options,
+					}
+				)
+			else:
+				result.append(
+					{
+						"name": attribute_name,
+						"visible": True,
+						"variation": True,
+						"options": options,
+					}
+				)
+
+		return result
+
+	def _find_existing_erpnext_item_attribute(
+		self,
+		attribute_name: str,
+		attribute_slug: str | None = None,
+	) -> str | None:
+		"""Find an existing ERPNext Item Attribute using normalised name/slug."""
+		if frappe.db.exists(
+			"Item Attribute",
+			attribute_name,
+		):
+			return attribute_name
+
+		target_keys = {
+			self._normalise_attribute_key(
+				attribute_name
+			)
+		}
+
+		if attribute_slug:
+			target_keys.add(
+				self._normalise_attribute_key(
+					attribute_slug
+				)
+			)
+
+		matches = []
+
+		for row in frappe.get_all(
+			"Item Attribute",
+			fields=[
+				"name",
+				"attribute_name",
+			],
+		):
+			candidate_keys = {
+				self._normalise_attribute_key(
+					row.name
+				),
+				self._normalise_attribute_key(
+					row.attribute_name
+				),
+			}
+
+			if target_keys & candidate_keys:
+				matches.append(row.name)
+
+		if len(matches) > 1:
+			frappe.throw(
+				_(
+					"More than one ERPNext Item Attribute matches "
+					"WooCommerce attribute {0}: {1}"
+				).format(
+					attribute_name,
+					", ".join(matches),
+				)
+			)
+
+		return matches[0] if matches else None
+
+	def _get_wc_attribute_display_name(
+		self,
+		wc_product: WooCommerceProduct,
+		wc_attribute: dict,
+	) -> str:
+		"""
+		Return the canonical WooCommerce attribute name.
+
+		For global attributes, prefer the global attribute master name resolved
+		from the current server's attribute ID.
+		"""
+		attribute_id = int(
+			wc_attribute.get("id") or 0
+		)
+
+		if attribute_id:
+			for global_attribute in (
+				self.get_global_woocommerce_attributes(
+					wc_product.woocommerce_server
+				)
+			):
+				if int(global_attribute.get("id") or 0) == attribute_id:
+					if global_attribute.get("name"):
+						return str(
+							global_attribute["name"]
+						).strip()
+
+		name = str(
+			wc_attribute.get("name") or ""
+		).strip()
+
+		if not name:
+			frappe.throw(
+				_(
+					"WooCommerce attribute has neither a resolvable "
+					"global ID nor a name on product {0}."
+				).format(wc_product.name)
+			)
+
+		return name
+
+	def _get_parent_woocommerce_attributes(
+		self,
+		parent_wc_product: WooCommerceProduct,
+	) -> list[dict]:
+		"""Return the parent WooCommerce product attributes as a Python list."""
+		raw_attributes = parent_wc_product.attributes
+
+		if not raw_attributes:
+			return []
+
+		if isinstance(raw_attributes, str):
+			attributes = json.loads(raw_attributes)
+		else:
+			attributes = raw_attributes
+
+		if not isinstance(attributes, list):
+			frappe.throw(
+				_(
+					"Unexpected attributes data on WooCommerce parent "
+					"Product {0} ({1})."
+				).format(
+					parent_wc_product.woocommerce_id,
+					parent_wc_product.woocommerce_server,
+				)
+			)
+
+		return attributes
+
+	def _find_parent_woocommerce_attribute(
+		self,
+		parent_attributes: list[dict],
+		erpnext_attribute_name: str,
+	) -> dict | None:
+		"""
+		Match an ERPNext Item Attribute to the attribute that is ACTUALLY
+		configured on the WooCommerce parent product.
+
+		This is intentionally different from looking up the store's global
+		attribute master. An existing parent may legitimately/ historically
+		use a local product attribute even when a same-named global attribute
+		also exists on that WooCommerce Server.
+		"""
+		target = self._normalise_attribute_key(
+			erpnext_attribute_name
+		)
+
+		name_matches = []
+		slug_matches = []
+
+		for parent_attribute in parent_attributes:
+			if (
+				self._normalise_attribute_key(
+					parent_attribute.get("name")
+				)
+				== target
+			):
+				name_matches.append(parent_attribute)
+				continue
+
+			if (
+				parent_attribute.get("slug")
+				and self._normalise_attribute_key(
+					parent_attribute.get("slug")
+				)
+				== target
+			):
+				slug_matches.append(parent_attribute)
+
+		matches = name_matches or slug_matches
+
+		if len(matches) > 1:
+			frappe.throw(
+				_(
+					"More than one parent WooCommerce attribute "
+					"matches ERPNext Item Attribute {0}."
+				).format(
+					erpnext_attribute_name
+				)
+			)
+
+		return matches[0] if matches else None
+
+	def _build_parent_attributes_update_payload(
+		self,
+		parent_attributes: list[dict],
+	) -> list[dict]:
+		"""
+		Build only fields accepted by WooCommerce when updating a variable
+		product's attributes. Do not send response-only fields such as slug.
+		"""
+		payload = []
+
+		for attribute in parent_attributes:
+			attribute_id = int(
+				attribute.get("id") or 0
+			)
+
+			row = {
+				"position": int(
+					attribute.get("position") or 0
+				),
+				"visible": bool(
+					attribute.get("visible", True)
+				),
+				"variation": bool(
+					attribute.get("variation", False)
+				),
+				"options": list(
+					attribute.get("options") or []
+				),
+			}
+
+			if attribute_id:
+				row["id"] = attribute_id
+			else:
+				row["name"] = attribute.get("name")
+
+			payload.append(row)
+
+		return payload
+
+	def build_woocommerce_variation_attributes_from_parent(
+		self,
+		item: ERPNextItemToSync,
+		parent_wc_product: WooCommerceProduct,
+	) -> list[dict]:
+		"""
+		Build variation attributes from the ACTUAL WooCommerce parent product.
+
+		Why:
+		A variation attribute must match the exact attribute attached to its
+		parent product. Looking up a same-named global attribute independently
+		can be wrong when the parent uses a local/product-specific attribute.
+
+		Behavior per WooCommerce Server:
+		- Parent attribute is global -> use that exact parent attribute ID.
+		- Parent attribute is local  -> use that exact parent attribute name.
+		- Ensure a global option exists as a taxonomy term.
+		- Ensure the option is assigned to the parent attribute before creating
+		  the variation.
+		"""
+		woocommerce_server = (
+			item.item_woocommerce_server.woocommerce_server
+		)
+
+		if (
+			parent_wc_product.woocommerce_server
+			!= woocommerce_server
+		):
+			frappe.throw(
+				_(
+					"Parent WooCommerce Product server {0} does not "
+					"match variant server {1}."
+				).format(
+					parent_wc_product.woocommerce_server,
+					woocommerce_server,
+				)
+			)
+
+		parent_attributes = (
+			self._get_parent_woocommerce_attributes(
+				parent_wc_product
+			)
+		)
+
+		result = []
+		parent_changed = False
+
+		for row in item.item.attributes:
+			item_attribute = frappe.get_doc(
+				"Item Attribute",
+				row.attribute,
+			)
+			attribute_name = (
+				item_attribute.attribute_name
+				or item_attribute.name
+			)
+			option = str(
+				row.attribute_value or ""
+			).strip()
+
+			parent_attribute = (
+				self._find_parent_woocommerce_attribute(
+					parent_attributes,
+					attribute_name,
+				)
+			)
+
+			if not parent_attribute:
+				frappe.throw(
+					_(
+						"WooCommerce parent Product {0} on server {1} "
+						"does not contain variant attribute {2}. "
+						"Synchronize/review the template product before "
+						"creating variant {3}."
+					).format(
+						parent_wc_product.woocommerce_id,
+						woocommerce_server,
+						attribute_name,
+						item.item.name,
+					)
+				)
+
+			if not parent_attribute.get(
+				"variation",
+				False,
+			):
+				frappe.throw(
+					_(
+						"WooCommerce parent attribute {0} on Product "
+						"{1} / server {2} is not enabled for variations."
+					).format(
+						parent_attribute.get("name")
+						or attribute_name,
+						parent_wc_product.woocommerce_id,
+						woocommerce_server,
+					)
+				)
+
+			parent_attribute_id = int(
+				parent_attribute.get("id") or 0
+			)
+
+			# Use the exact global attribute ID attached to THIS parent.
+			if parent_attribute_id:
+				self.ensure_global_woocommerce_attribute_terms(
+					woocommerce_server,
+					parent_attribute_id,
+					[option],
+				)
+
+				result.append(
+					{
+						"id": parent_attribute_id,
+						"option": option,
+					}
+				)
+			else:
+				# Parent is using a local/product-specific attribute.
+				result.append(
+					{
+						"name": (
+							parent_attribute.get("name")
+							or attribute_name
+						),
+						"option": option,
+					}
+				)
+
+			# The variation can only be properly selectable if its option is
+			# assigned to the corresponding parent attribute.
+			parent_options = list(
+				parent_attribute.get("options") or []
+			)
+			parent_option_keys = {
+				self._normalise_attribute_key(
+					value
+				)
+				for value in parent_options
+			}
+
+			if (
+				option
+				and self._normalise_attribute_key(
+					option
+				)
+				not in parent_option_keys
+			):
+				parent_options.append(option)
+				parent_attribute["options"] = (
+					parent_options
+				)
+				parent_changed = True
+
+		# Repair only missing parent OPTIONS while preserving the parent's
+		# existing global/local attribute structure.
+		if parent_changed:
+			wc_api = self._get_wc_api_for_server(
+				woocommerce_server
+			)
+			endpoint = (
+				f"products/"
+				f"{parent_wc_product.woocommerce_id}"
+			)
+
+			response = wc_api.api.put(
+				endpoint,
+				data={
+					"attributes": (
+						self._build_parent_attributes_update_payload(
+							parent_attributes
+						)
+					)
+				},
+			)
+
+			if response.status_code != 200:
+				log_and_raise_error(
+					error_text=(
+						"Unable to assign variant attribute options "
+						f"to WooCommerce parent Product "
+						f"{parent_wc_product.woocommerce_id} "
+						f"on {woocommerce_server}"
+					),
+					response=response,
+				)
+
+			updated_parent = response.json()
+
+			if isinstance(updated_parent, dict):
+				parent_wc_product.attributes = json.dumps(
+					updated_parent.get(
+						"attributes",
+						parent_attributes,
+					)
+				)
+
+		return result
 	def get_parent_woocommerce_product_for_server(
 		self,
 		item: ERPNextItemToSync,
@@ -629,24 +1390,13 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			# Handle variants
 			if item.item.has_variants:
 				wc_product.type = "variable"
-				wc_product_attributes = []
 
-				# Handle attributes
-				for row in item.item.attributes:
-					item_attribute = frappe.get_doc("Item Attribute", row.attribute)
-					wc_product_attributes.append(
-						{
-							"name": row.attribute,
-							"slug": row.attribute.lower().replace(" ", "_"),
-							"visible": True,
-							"variation": True,
-							"options": [
-								option.attribute_value for option in item_attribute.item_attribute_values
-							],
-						}
+				wc_product.attributes = json.dumps(
+					self.build_woocommerce_attributes_from_erpnext(
+						item=item,
+						variation=False,
 					)
-
-				wc_product.attributes = json.dumps(wc_product_attributes)
+				)
 
 			if item.item.variant_of:
 				# Resolve the parent WooCommerce Product from the SAME
@@ -657,17 +1407,15 @@ class SynchroniseItem(SynchroniseWooCommerce):
 				wc_product.parent_id = parent_wc_product.woocommerce_id
 				wc_product.type = "variation"
 
-				# Handle attributes
-				wc_product_attributes = [
-					{
-						"name": row.attribute,
-						"slug": row.attribute.lower().replace(" ", "_"),
-						"option": row.attribute_value,
-					}
-					for row in item.item.attributes
-				]
-
-				wc_product.attributes = json.dumps(wc_product_attributes)
+				# Build attributes from the ACTUAL parent product on this server.
+				# This preserves each parent's global/local attribute model and
+				# prevents WooCommerce from silently dropping mismatched attrs.
+				wc_product.attributes = json.dumps(
+					self.build_woocommerce_variation_attributes_from_parent(
+						item=item,
+						parent_wc_product=parent_wc_product,
+					)
+				)
 
 			# Set properties
 			wc_product.woocommerce_server = item.item_woocommerce_server.woocommerce_server
@@ -702,15 +1450,31 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		# Create Item
 		item = frappe.new_doc("Item")
 
-		# Handle variants' attributes
+		# Handle variants' attributes.
+		# Global and local WooCommerce attributes both resolve to the matched
+		# ERPNext Item Attribute name.
 		if wc_product.type in ["variable", "variation"]:
-			self.create_or_update_item_attributes(wc_product)
-			wc_attributes = json.loads(wc_product.attributes)
-			for wc_attribute in wc_attributes:
+			resolved_attribute_names = (
+				self.create_or_update_item_attributes(
+					wc_product
+				)
+			)
+			wc_attributes = json.loads(
+				wc_product.attributes
+			)
+
+			for index, wc_attribute in enumerate(
+				wc_attributes
+			):
 				row = item.append("attributes")
-				row.attribute = wc_attribute["name"]
+				row.attribute = (
+					resolved_attribute_names[index]
+				)
+
 				if wc_product.type == "variation":
-					row.attribute_value = wc_attribute["option"]
+					row.attribute_value = (
+						wc_attribute["option"]
+					)
 
 		# Handle variants
 		if wc_product.type == "variable":
@@ -759,46 +1523,119 @@ class SynchroniseItem(SynchroniseWooCommerce):
 
 		self.set_sync_hash()
 
-	def create_or_update_item_attributes(self, wc_product: WooCommerceProduct):
-		"""
-		Create or update an Item Attribute
-		"""
-		if wc_product.attributes:
-			wc_attributes = json.loads(wc_product.attributes)
-			for wc_attribute in wc_attributes:
-				if frappe.db.exists("Item Attribute", wc_attribute["name"]):
-					# Get existing Item Attribute
-					item_attribute = frappe.get_doc("Item Attribute", wc_attribute["name"])
-				else:
-					# Create a Item Attribute
-					item_attribute = frappe.get_doc(
-						{"doctype": "Item Attribute", "attribute_name": wc_attribute["name"]}
-					)
 
-				# Get list of attribute options.
-				# In variable WooCommerce Products, it's a list with key "options"
-				# In a WooCommerce Product variant, it's a single value with key "option"
+	def create_or_update_item_attributes(
+		self,
+		wc_product: WooCommerceProduct,
+	) -> list[str]:
+		"""
+		Create/update ERPNext Item Attributes additively.
+
+		Global and local WooCommerce attributes are both mapped by their canonical
+		display name to one ERPNext Item Attribute. Existing ERPNext values are
+		never deleted merely because a particular WooCommerce product/variation
+		does not use them.
+
+		Returns ERPNext Item Attribute names in the same order as the WooCommerce
+		product's attributes.
+		"""
+		resolved_attribute_names = []
+
+		if not wc_product.attributes:
+			return resolved_attribute_names
+
+		wc_attributes = json.loads(
+			wc_product.attributes
+		)
+
+		for wc_attribute in wc_attributes:
+			attribute_name = (
+				self._get_wc_attribute_display_name(
+					wc_product,
+					wc_attribute,
+				)
+			)
+
+			erpnext_attribute_name = (
+				self._find_existing_erpnext_item_attribute(
+					attribute_name,
+					wc_attribute.get("slug"),
+				)
+			)
+
+			if erpnext_attribute_name:
+				item_attribute = frappe.get_doc(
+					"Item Attribute",
+					erpnext_attribute_name,
+				)
+				is_new = False
+			else:
+				item_attribute = frappe.get_doc(
+					{
+						"doctype": "Item Attribute",
+						"attribute_name": attribute_name,
+					}
+				)
+				is_new = True
+
+			if wc_product.type == "variable":
+				options = wc_attribute.get(
+					"options"
+				) or []
+			else:
+				option = wc_attribute.get("option")
 				options = (
-					wc_attribute["options"] if wc_product.type == "variable" else [wc_attribute["option"]]
+					[option]
+					if option not in (None, "")
+					else []
 				)
 
-				# If no attributes values exist, or attribute values exist already but are different, remove and update them
-				if len(item_attribute.item_attribute_values) == 0 or (
-					len(item_attribute.item_attribute_values) > 0
-					and set(options)
-					!= set([val.attribute_value for val in item_attribute.item_attribute_values])
-				):
-					item_attribute.item_attribute_values = []
-					for option in options:
-						row = item_attribute.append("item_attribute_values")
-						row.attribute_value = option
-						row.abbr = option.replace(" ", "")
+			existing_by_key = {
+				self._normalise_attribute_key(
+					value.attribute_value
+				): value.attribute_value
+				for value in (
+					item_attribute.item_attribute_values
+				)
+				if value.attribute_value
+			}
 
-				item_attribute.flags.ignore_mandatory = True
-				if not item_attribute.name:
-					item_attribute.insert()
-				else:
-					item_attribute.save()
+			values_added = False
+
+			for option in options:
+				option = str(option or "").strip()
+				if not option:
+					continue
+
+				key = self._normalise_attribute_key(
+					option
+				)
+				if key in existing_by_key:
+					continue
+
+				row = item_attribute.append(
+					"item_attribute_values"
+				)
+				row.attribute_value = option
+				# Keep the ERPNext abbreviation identical to the business value.
+				# Existing abbreviations are never changed; this applies only to
+				# newly imported WooCommerce attribute values.
+				row.abbr = option
+				existing_by_key[key] = option
+				values_added = True
+
+			item_attribute.flags.ignore_mandatory = True
+
+			if is_new:
+				item_attribute.insert()
+			elif values_added:
+				item_attribute.save()
+
+			resolved_attribute_names.append(
+				item_attribute.name
+			)
+
+		return resolved_attribute_names
 
 	def set_item_fields(self, item: Item) -> tuple[bool, Item]:
 		"""

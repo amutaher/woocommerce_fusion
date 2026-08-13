@@ -94,34 +94,100 @@ class WooCommerceResource(Document):
 		"""
 		self.wc_api_list = self._init_api()
 
-	def load_from_db(self):
+	def get_wc_api_for_domain(self, wc_server_domain: str) -> WooCommerceAPI:
 		"""
-		Returns a single WooCommerce Record (Form view)
+		Return the WooCommerce API configured for exactly one server/domain.
+
+		Exact matching is required because a domain such as copy.sareaapp.com
+		is also contained in sibling domains such as ibb.copy.sareaapp.com,
+		dhamar.copy.sareaapp.com, and aden.copy.sareaapp.com.
 		"""
-		# Verify that the WC API has been initialised
 		if not self.wc_api_list:
 			self.init_api()
 
-		# Parse the server domain and record_id from the Document name
+		matches = [
+			api
+			for api in self.wc_api_list
+			if api.woocommerce_server == wc_server_domain
+		]
+
+		if not matches:
+			matches = [
+				api
+				for api in self.wc_api_list
+				if parse_domain_from_url(api.woocommerce_server_url) == wc_server_domain
+			]
+
+		if not matches:
+			frappe.throw(
+				_("No enabled WooCommerce Server found for domain {0}").format(
+					wc_server_domain
+				)
+			)
+
+		if len(matches) > 1:
+			frappe.throw(
+				_("More than one enabled WooCommerce Server matches domain {0}").format(
+					wc_server_domain
+				)
+			)
+
+		return matches[0]
+
+	def load_from_db(self):
+		"""
+		Return a single WooCommerce record using the exact WooCommerce Server
+		encoded in the virtual document name.
+		"""
+		if not self.wc_api_list:
+			self.init_api()
+
 		wc_server_domain, record_id = get_domain_and_id_from_woocommerce_record_name(self.name)
 
-		# Select the relevant WooCommerce server
-		self.current_wc_api = next(
-			(api for api in self.wc_api_list if wc_server_domain in api.woocommerce_server_url), None
-		)
+		self.current_wc_api = self.get_wc_api_for_domain(wc_server_domain)
 
-		# Get WooCommerce Record
+		endpoint = f"{self.resource}/{record_id}"
+
 		try:
-			record = self.current_wc_api.api.get(f"{self.resource}/{record_id}").json()
-		except Exception:
-			error_text = (
-				f"load_from_db failed (WooCommerce {self.resource} #{record_id})\n\n{frappe.get_traceback()}"
-			)
-			log_and_raise_error(error_text)
-
-		if "id" not in record:
+			response = self.current_wc_api.api.get(endpoint)
+		except Exception as err:
 			log_and_raise_error(
-				error_text=f"load_from_db failed (WooCommerce {self.resource} #{record_id})\nOrder:\n{record}"
+				err,
+				error_text=(
+					f"load_from_db failed (WooCommerce {self.resource} #{record_id}) "
+					f"on {wc_server_domain}"
+				),
+			)
+
+		if response.status_code != 200:
+			log_and_raise_error(
+				error_text=(
+					f"load_from_db failed (WooCommerce {self.resource} #{record_id}) "
+					f"on {wc_server_domain}"
+				),
+				response=response,
+			)
+
+		try:
+			record = response.json()
+		except Exception as err:
+			log_and_raise_error(
+				err,
+				error_text=(
+					f"Invalid JSON returned by WooCommerce {self.resource} "
+					f"#{record_id} on {wc_server_domain}"
+				),
+				response=response,
+			)
+
+		if not isinstance(record, dict) or "id" not in record:
+			log_and_raise_error(
+				error_text=(
+					f"load_from_db returned an unexpected response "
+					f"(WooCommerce {self.resource} #{record_id}) "
+					f"on {wc_server_domain}: {record}"
+				),
+				response=response,
 			)
 
 		record = self.pre_init_document(
@@ -132,7 +198,22 @@ class WooCommerceResource(Document):
 		self.call_super_init(record)
 
 	def call_super_init(self, record: dict):
+		"""
+		Initialise a WooCommerce virtual document the same way Frappe
+		initialises a Document created from a dict.
+
+		WooCommerceResource.load_from_db() is called from Document.__init__()
+		when frappe.get_doc(doctype, name) is used. Because we populate the
+		virtual document from the WooCommerce API rather than SQL, we call
+		BaseDocument.__init__() directly here, then complete the two standard
+		Frappe initialisation steps that Document.__init__() normally performs.
+
+		This ensures default fields such as creation, owner, modified_by, idx,
+		docstatus, etc. always exist on the virtual document.
+		"""
 		super(Document, self).__init__(record)
+		self.init_child_tables()
+		self.init_valid_columns()
 
 	def after_load_from_db(self, record: dict):
 		return record
@@ -354,10 +435,8 @@ class WooCommerceResource(Document):
 		# Parse the server domain and id from the Document name
 		wc_server_domain, id = get_domain_and_id_from_woocommerce_record_name(self.name)
 
-		# Select the relevant WooCommerce server
-		self.current_wc_api = next(
-			(api for api in self.wc_api_list if wc_server_domain in api.woocommerce_server_url), None
-		)
+		# Select the exact WooCommerce Server encoded in the document name.
+		self.current_wc_api = self.get_wc_api_for_domain(wc_server_domain)
 
 		# Make API call
 		endpoint = (
