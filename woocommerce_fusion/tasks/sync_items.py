@@ -272,6 +272,7 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		self._wc_api_cache = {}
 		self._wc_global_attributes_cache = {}
 		self._wc_global_terms_cache = {}
+		self._wc_global_term_records_cache = {}
 
 	@_serialized_item_sync
 	def run(self):
@@ -1488,6 +1489,23 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			parent_item, _parent_wc_product = run_item_sync(woocommerce_product_name=woocommerce_product_name)
 			item.variant_of = parent_item.item_code
 
+			# create_or_update_item_attributes() has already canonicalised
+			# global variation options from taxonomy slugs to term names.
+			# Build the ERPNext Item Name from those canonical business values
+			# instead of the raw WooCommerce variation payload.
+			canonical_attribute_values = [
+				str(attribute.get("option") or "").strip()
+				for attribute in json.loads(wc_product.attributes)
+				if str(attribute.get("option") or "").strip()
+			]
+
+			if canonical_attribute_values:
+				wc_product.woocommerce_name = (
+					parent_item.item_name
+					+ " - "
+					+ ", ".join(canonical_attribute_values)
+				)
+
 		item.item_code = (
 			wc_product.sku
 			if wc_server.name_by == "Product SKU" and wc_product.sku
@@ -1524,6 +1542,113 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		self.set_sync_hash()
 
 
+
+	def _normalise_attribute_value_key(self, value) -> str:
+		"""
+		Normalise attribute VALUES for equality checks only.
+
+		Unlike attribute-name normalisation, punctuation such as hyphens and
+		dots is preserved because it can be meaningful in a business value.
+		"""
+		return " ".join(
+			unquote(str(value or ""))
+			.strip()
+			.casefold()
+			.split()
+		)
+
+	def _get_global_woocommerce_attribute_term_records(
+		self,
+		woocommerce_server: str,
+		attribute_id: int,
+	) -> list[dict]:
+		"""Return all terms for one global WooCommerce attribute, cached per sync."""
+		cache_key = (
+			woocommerce_server,
+			int(attribute_id),
+		)
+
+		if cache_key not in self._wc_global_term_records_cache:
+			self._wc_global_term_records_cache[cache_key] = (
+				self._get_all_wc_records(
+					woocommerce_server,
+					f"products/attributes/{attribute_id}/terms",
+				)
+			)
+
+		return self._wc_global_term_records_cache[cache_key]
+
+	def _resolve_inbound_woocommerce_attribute_option(
+		self,
+		wc_product: WooCommerceProduct,
+		wc_attribute: dict,
+		option,
+	) -> str:
+		"""
+		Resolve a WooCommerce global variation option to its canonical TERM NAME.
+
+		Some stores/variation payloads expose the stored taxonomy term slug in
+		``option`` while the parent/global attribute uses the human-readable term
+		name. ERPNext must store the term name, not the slug, otherwise values such
+		as ``2.70 متر`` and its slug-like representation become duplicates.
+
+		Local/product-specific attributes (id=0) are left unchanged.
+		"""
+		option = str(option or "").strip()
+		if not option:
+			return option
+
+		attribute_id = int(
+			wc_attribute.get("id") or 0
+		)
+
+		if not attribute_id:
+			return option
+
+		terms = self._get_global_woocommerce_attribute_term_records(
+			wc_product.woocommerce_server,
+			attribute_id,
+		)
+
+		option_key = self._normalise_attribute_value_key(
+			option
+		)
+
+		# Prefer an exact term-name match.
+		for term in terms:
+			term_name = str(
+				term.get("name") or ""
+			).strip()
+
+			if (
+				term_name
+				and self._normalise_attribute_value_key(
+					term_name
+				)
+				== option_key
+			):
+				return term_name
+
+		# Then match the stored taxonomy slug and return the canonical name.
+		for term in terms:
+			term_slug = str(
+				term.get("slug") or ""
+			).strip()
+
+			if (
+				term_slug
+				and self._normalise_attribute_value_key(
+					term_slug
+				)
+				== option_key
+			):
+				term_name = str(
+					term.get("name") or ""
+				).strip()
+
+				return term_name or option
+
+		return option
 	def create_or_update_item_attributes(
 		self,
 		wc_product: WooCommerceProduct,
@@ -1531,10 +1656,12 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		"""
 		Create/update ERPNext Item Attributes additively.
 
-		Global and local WooCommerce attributes are both mapped by their canonical
-		display name to one ERPNext Item Attribute. Existing ERPNext values are
-		never deleted merely because a particular WooCommerce product/variation
-		does not use them.
+		Global WooCommerce options are canonicalised to the WooCommerce term NAME
+		before they are stored in ERPNext. This prevents taxonomy slugs from being
+		created as duplicate ERPNext Attribute Values.
+
+		Existing ERPNext values are never deleted merely because a particular
+		WooCommerce product/variation does not use them.
 
 		Returns ERPNext Item Attribute names in the same order as the WooCommerce
 		product's attributes.
@@ -1579,19 +1706,51 @@ class SynchroniseItem(SynchroniseWooCommerce):
 				is_new = True
 
 			if wc_product.type == "variable":
-				options = wc_attribute.get(
-					"options"
-				) or []
+				raw_options = (
+					wc_attribute.get("options")
+					or []
+				)
+
+				options = [
+					self._resolve_inbound_woocommerce_attribute_option(
+						wc_product,
+						wc_attribute,
+						option,
+					)
+					for option in raw_options
+				]
+
+				# Keep the WooCommerce virtual document canonical too, so any
+				# later Item construction reads the proper business values.
+				wc_attribute["options"] = options
+
 			else:
-				option = wc_attribute.get("option")
+				raw_option = wc_attribute.get(
+					"option"
+				)
+
+				option = (
+					self._resolve_inbound_woocommerce_attribute_option(
+						wc_product,
+						wc_attribute,
+						raw_option,
+					)
+					if raw_option not in (None, "")
+					else ""
+				)
+
 				options = (
 					[option]
-					if option not in (None, "")
+					if option
 					else []
 				)
 
+				# create_item() reads the attributes again after this method.
+				# Replace the raw slug-like option with the canonical term name.
+				wc_attribute["option"] = option
+
 			existing_by_key = {
-				self._normalise_attribute_key(
+				self._normalise_attribute_value_key(
 					value.attribute_value
 				): value.attribute_value
 				for value in (
@@ -1603,13 +1762,17 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			values_added = False
 
 			for option in options:
-				option = str(option or "").strip()
+				option = str(
+					option or ""
+				).strip()
+
 				if not option:
 					continue
 
-				key = self._normalise_attribute_key(
+				key = self._normalise_attribute_value_key(
 					option
 				)
+
 				if key in existing_by_key:
 					continue
 
@@ -1617,10 +1780,10 @@ class SynchroniseItem(SynchroniseWooCommerce):
 					"item_attribute_values"
 				)
 				row.attribute_value = option
-				# Keep the ERPNext abbreviation identical to the business value.
-				# Existing abbreviations are never changed; this applies only to
-				# newly imported WooCommerce attribute values.
+
+				# Current rule: new abbreviation = exact business value.
 				row.abbr = option
+
 				existing_by_key[key] = option
 				values_added = True
 
@@ -1635,8 +1798,13 @@ class SynchroniseItem(SynchroniseWooCommerce):
 				item_attribute.name
 			)
 
-		return resolved_attribute_names
+		# Persist canonical term names on the in-memory virtual Woo product.
+		# create_item() immediately reads this JSON to build Variant Attributes.
+		wc_product.attributes = json.dumps(
+			wc_attributes
+		)
 
+		return resolved_attribute_names
 	def set_item_fields(self, item: Item) -> tuple[bool, Item]:
 		"""
 		If there exist any Field Mappings on `WooCommerce Server`, attempt to synchronise their values from
