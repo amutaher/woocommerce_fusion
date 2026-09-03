@@ -177,6 +177,7 @@ scheduler_events = {
 	"hourly_long": [
 		"woocommerce_fusion.tasks.sync_sales_orders.sync_woocommerce_orders_modified_since",
 		"woocommerce_fusion.tasks.sync_items.sync_woocommerce_products_modified_since",
+        "woocommerce_fusion.tasks.order_status_sync.reconcile_recent_sales_order_statuses",
 	],
 	"daily_long": [
 		"woocommerce_fusion.tasks.stock_update.update_stock_levels_for_all_enabled_items_in_background",

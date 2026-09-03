@@ -12,6 +12,11 @@ from woocommerce_fusion.woocommerce.woocommerce_api import (
 )
 from frappe.utils import add_days, cint, cstr, flt, get_link_to_form, getdate, nowdate, strip_html
 
+from woocommerce_fusion.tasks.order_status_sync import (
+			sales_order_status_sync_required,
+			sync_sales_order_status_and_reconciliation,
+		)
+
 
 class CustomSalesOrder(SalesOrder):
 	"""
@@ -22,53 +27,77 @@ class CustomSalesOrder(SalesOrder):
 	"""
 
 	def autoname(self):
-		"""
-		If this is a WooCommerce-linked order, use the naming series defined in "WooCommerce Server"
-		or default to WEB[WooCommerce Order ID], e.g. WEB012142.
-		Else, name it normally.
-		"""
-		if self.woocommerce_id and self.woocommerce_server:
-			wc_server = frappe.get_cached_doc("WooCommerce Server", self.woocommerce_server)
-			if wc_server.sales_order_series:
-				self.name = make_autoname(key=wc_server.sales_order_series)
+			"""
+			If this is a WooCommerce-linked order, use the naming series defined in "WooCommerce Server"
+			or default to WEB[WooCommerce Order ID], e.g. WEB012142.
+			Else, name it normally.
+			"""
+			if self.woocommerce_id and self.woocommerce_server:
+				wc_server = frappe.get_cached_doc("WooCommerce Server", self.woocommerce_server)
+				if wc_server.sales_order_series:
+					self.name = make_autoname(key=wc_server.sales_order_series)
+				else:
+					if wc_server.custom_naming_series_prefix:
+						self.name = f"{wc_server.custom_naming_series_prefix}-{int(self.woocommerce_id):06}"
+					else:
+						# Get idx of site
+						wc_servers = frappe.get_all("WooCommerce Server", fields=["name", "creation"])
+						sorted_list = sorted(wc_servers, key=lambda server: server.creation)
+						idx = next(
+							(index for (index, d) in enumerate(sorted_list) if d["name"] == self.woocommerce_server),
+							None,
+						)
+						self.name = f"WEB{idx + 1}-{int(self.woocommerce_id):06}"  # Format with leading zeros to make it 6 digits
 			else:
-				# Get idx of site
-				wc_servers = frappe.get_all("WooCommerce Server", fields=["name", "creation"])
-				sorted_list = sorted(wc_servers, key=lambda server: server.creation)
-				idx = next(
-					(index for (index, d) in enumerate(sorted_list) if d["name"] == self.woocommerce_server),
-					None,
-				)
-				self.name = f"WEB{idx + 1}-{int(self.woocommerce_id):06}"  # Format with leading zeros to make it 6 digits
-		else:
-			naming_series = get_default_naming_series("Sales Order")
-			self.name = make_autoname(key=naming_series)
+				naming_series = get_default_naming_series("Sales Order")
+				self.name = make_autoname(key=naming_series)
 
 	def on_change(self):
 		"""
-		This is called when a document's values has been changed (including db_set).
+		Handle ERPNext -> WooCommerce Sales Order status synchronization.
+
+		Important:
+		woocommerce_status represents the LAST CONFIRMED WooCommerce
+		status. Never write the intended status before WooCommerce
+		confirms it.
 		"""
-		# If Sales Order Status Sync is enabled, update the WooCommerce status of the Sales Order
-		if self.woocommerce_id and self.woocommerce_server:
-			wc_server = frappe.get_cached_doc("WooCommerce Server", self.woocommerce_server)
-			if wc_server.enable_so_status_sync:
-				mapping = next(
-					(
-						row
-						for row in wc_server.sales_order_status_map
-						if row.erpnext_sales_order_status == self.status
-					),
-					None,
-				)
-				if mapping:
-					if self.woocommerce_status != mapping.woocommerce_sales_order_status:
-						frappe.db.set_value(
-							"Sales Order",
-							self.name,
-							"woocommerce_status",
-							mapping.woocommerce_sales_order_status,
-						)
-						frappe.enqueue(run_sales_order_sync, queue="long", sales_order_name=self.name)
+		if (
+			self.flags.get("created_by_sync")
+			or not self.woocommerce_id
+			or not self.woocommerce_server
+		):
+			return
+
+		wc_server = frappe.get_cached_doc(
+			"WooCommerce Server",
+			self.woocommerce_server,
+		)
+
+		if not wc_server.enable_sync:
+			return
+
+		status_required = (
+	        sales_order_status_sync_required(
+	            self
+	        )
+	    )
+
+		if not status_required:
+			return
+
+		frappe.enqueue(
+	        sync_sales_order_status_and_reconciliation,
+	        queue="long",
+	        enqueue_after_commit=True,
+	        sales_order_name=self.name,
+	        run_reconciliation_after=(
+	            self.docstatus == 1
+	        ),
+	    )
+
+	    # Used by the doc_event handler below so it does not queue
+	    # a competing reconciliation job for this same change.
+		self.flags.woocommerce_status_sync_queued = True
 
 
 @frappe.whitelist()
@@ -205,7 +234,7 @@ def make_delivery_note(source_name, target_doc=None, kwargs=None):
 				return False
 
 		return (
-			(abs(doc.delivered_qty) < abs(doc.qty)) or is_unit_price_row(doc)
+			((abs(doc.delivered_qty) + abs(doc.delivered_qty)) < abs(doc.qty)) or is_unit_price_row(doc)
 		) and doc.delivered_by_supplier != 1
 
 	def update_item(source, target, source_parent):

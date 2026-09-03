@@ -430,6 +430,51 @@ class SynchroniseItem(SynchroniseWooCommerce):
 				)
 	
 			wc_product_dirty = False
+
+			# A mapped ERPNext variant must keep its WooCommerce variation
+			# attributes synchronized too. Previously update_woocommerce_product()
+			# only updated the name/mapped fields, so an existing "Any ..."
+			# variation could never repair itself on a later ERPNext sync.
+			expected_variation_attributes = None
+			parent_wc_product = None
+
+			if item.item.variant_of:
+				_parent_item, parent_wc_product = (
+					self.get_parent_woocommerce_product_for_server(
+						item
+					)
+				)
+
+				expected_variation_attributes = (
+					self.build_woocommerce_variation_attributes_from_parent(
+						item=item,
+						parent_wc_product=parent_wc_product,
+					)
+				)
+
+				current_attributes = (
+					json.loads(
+						wc_product.attributes
+					)
+					if isinstance(
+						wc_product.attributes,
+						str,
+					)
+					else (
+						wc_product.attributes
+						or []
+					)
+				)
+
+				if not self._variation_attributes_match(
+					expected_variation_attributes,
+					current_attributes,
+					item.item_woocommerce_server.woocommerce_server,
+				):
+					wc_product.attributes = json.dumps(
+						expected_variation_attributes
+					)
+					wc_product_dirty = True
 	
 			# Apply Item name.
 			if wc_product.woocommerce_name != item.item.item_name:
@@ -480,6 +525,54 @@ class SynchroniseItem(SynchroniseWooCommerce):
 	
 			# Successful save.
 			self.woocommerce_product = wc_product
+
+			if (
+				item.item.variant_of
+				and parent_wc_product
+				and expected_variation_attributes
+			):
+				verified, actual_attributes = (
+					self.ensure_woocommerce_variation_attributes(
+						woocommerce_server=(
+							item.item_woocommerce_server.woocommerce_server
+						),
+						parent_woocommerce_id=(
+							parent_wc_product.woocommerce_id
+						),
+						variation_woocommerce_id=(
+							wc_product.woocommerce_id
+						),
+						expected_attributes=(
+							expected_variation_attributes
+						),
+					)
+				)
+
+				if not verified:
+					frappe.log_error(
+						title=(
+							"WooCommerce Variation Attribute "
+							"Verification Failed"
+						),
+						message=(
+							f"Server: "
+							f"{item.item_woocommerce_server.woocommerce_server}\n"
+							f"ERPNext Item: {item.item.name}\n"
+							f"WooCommerce Parent ID: "
+							f"{parent_wc_product.woocommerce_id}\n"
+							f"WooCommerce Variation ID: "
+							f"{wc_product.woocommerce_id}\n"
+							f"Expected Attributes: "
+							f"{expected_variation_attributes}\n"
+							f"Actual Attributes: "
+							f"{actual_attributes}"
+						),
+					)
+
+					# Keep the mapping but do not mark the record synchronized.
+					# A later manual/item sync can retry safely.
+					return
+
 			self.set_sync_hash()
 			return
 
@@ -656,70 +749,26 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		attribute_id: int,
 		values: list[str],
 	) -> None:
-		"""Create missing term names for a matched global WooCommerce attribute."""
-		cache_key = (
-			woocommerce_server,
-			int(attribute_id),
-		)
+		"""
+		Ensure all values exist as WooCommerce terms.
 
-		if cache_key not in self._wc_global_terms_cache:
-			terms = self._get_all_wc_records(
-				woocommerce_server,
-				f"products/attributes/{attribute_id}/terms",
-			)
-			self._wc_global_terms_cache[cache_key] = {
-				self._normalise_attribute_key(
-					term.get("name")
-				): term
-				for term in terms
-				if term.get("name")
-			}
-
-		terms_by_key = self._wc_global_terms_cache[
-			cache_key
-		]
-		wc_api = self._get_wc_api_for_server(
-			woocommerce_server
-		)
-
+		Kept as a compatibility helper for existing callers. Resolution is now
+		delegated to resolve_global_woocommerce_attribute_term(), which returns
+		the exact store-local WooCommerce term object.
+		"""
 		for value in values:
-			value = str(value or "").strip()
+			value = str(
+				value or ""
+			).strip()
+
 			if not value:
 				continue
 
-			key = self._normalise_attribute_key(value)
-			if key in terms_by_key:
-				continue
-
-			response = wc_api.api.post(
-				f"products/attributes/{attribute_id}/terms",
-				data={"name": value},
+			self.resolve_global_woocommerce_attribute_term(
+				woocommerce_server,
+				attribute_id,
+				value,
 			)
-
-			if response.status_code not in (200, 201):
-				response_data = response.json()
-				error_code = (
-					response_data.get("code")
-					if isinstance(response_data, dict)
-					else ""
-				)
-
-				# Another concurrent variant job may have created the same term
-				# after our initial GET. Treat a term-exists race as success.
-				if "term_exists" not in str(error_code):
-					log_and_raise_error(
-						error_text=(
-							"Unable to create WooCommerce attribute "
-							f"term {value} for attribute {attribute_id} "
-							f"on {woocommerce_server}"
-						),
-						response=response,
-					)
-
-			terms_by_key[key] = {
-				"name": value,
-			}
-
 	def build_woocommerce_attributes_from_erpnext(
 		self,
 		item: ERPNextItemToSync,
@@ -764,17 +813,26 @@ class SynchroniseItem(SynchroniseWooCommerce):
 				).strip()
 
 				if global_attribute:
-					self.ensure_global_woocommerce_attribute_terms(
-						woocommerce_server,
-						global_attribute["id"],
-						[option],
+					term = (
+						self.resolve_global_woocommerce_attribute_term(
+							woocommerce_server,
+							int(
+								global_attribute[
+									"id"
+								]
+							),
+							option,
+						)
 					)
 					result.append(
 						{
 							"id": int(
 								global_attribute["id"]
 							),
-							"option": option,
+							"option": str(
+								term.get("name")
+								or option
+							).strip(),
 						}
 					)
 				else:
@@ -794,17 +852,37 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			]
 
 			if global_attribute:
-				self.ensure_global_woocommerce_attribute_terms(
-					woocommerce_server,
-					global_attribute["id"],
-					options,
-				)
+				canonical_options = []
+
+				for option in options:
+					term = (
+						self.resolve_global_woocommerce_attribute_term(
+							woocommerce_server,
+							int(
+								global_attribute[
+									"id"
+								]
+							),
+							option,
+						)
+					)
+
+					canonical_option = str(
+						term.get("name")
+						or option
+					).strip()
+
+					if canonical_option:
+						canonical_options.append(
+							canonical_option
+						)
+
 				result.append(
 					{
 						"id": int(global_attribute["id"]),
 						"visible": True,
 						"variation": True,
-						"options": options,
+						"options": canonical_options,
 					}
 				)
 			else:
@@ -1142,13 +1220,21 @@ class SynchroniseItem(SynchroniseWooCommerce):
 				parent_attribute.get("id") or 0
 			)
 
-			# Use the exact global attribute ID attached to THIS parent.
+			# Use the exact global attribute ID attached to THIS parent,
+			# but resolve the ERPNext value to WooCommerce's canonical TERM NAME.
 			if parent_attribute_id:
-				self.ensure_global_woocommerce_attribute_terms(
-					woocommerce_server,
-					parent_attribute_id,
-					[option],
+				term = (
+					self.resolve_global_woocommerce_attribute_term(
+						woocommerce_server,
+						parent_attribute_id,
+						option,
+					)
 				)
+
+				option = str(
+					term.get("name")
+					or option
+				).strip()
 
 				result.append(
 					{
@@ -1174,7 +1260,7 @@ class SynchroniseItem(SynchroniseWooCommerce):
 				parent_attribute.get("options") or []
 			)
 			parent_option_keys = {
-				self._normalise_attribute_key(
+				self._normalise_attribute_value_key(
 					value
 				)
 				for value in parent_options
@@ -1182,7 +1268,7 @@ class SynchroniseItem(SynchroniseWooCommerce):
 
 			if (
 				option
-				and self._normalise_attribute_key(
+				and self._normalise_attribute_value_key(
 					option
 				)
 				not in parent_option_keys
@@ -1384,6 +1470,8 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		):
 			# Create a new WooCommerce Product doc
 			wc_product = frappe.get_doc({"doctype": "WooCommerce Product"})
+			expected_variation_attributes = None
+			parent_wc_product = None
 
 			wc_product.type = "simple"
 			wc_product.manage_stock = item.item.is_stock_item
@@ -1411,11 +1499,14 @@ class SynchroniseItem(SynchroniseWooCommerce):
 				# Build attributes from the ACTUAL parent product on this server.
 				# This preserves each parent's global/local attribute model and
 				# prevents WooCommerce from silently dropping mismatched attrs.
-				wc_product.attributes = json.dumps(
+				expected_variation_attributes = (
 					self.build_woocommerce_variation_attributes_from_parent(
 						item=item,
 						parent_wc_product=parent_wc_product,
 					)
+				)
+				wc_product.attributes = json.dumps(
+					expected_variation_attributes
 				)
 
 			# Set properties
@@ -1434,13 +1525,59 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			wc_product.insert()
 			self.woocommerce_product = wc_product
 
+			variation_verified = True
+
+			if (
+				item.item.variant_of
+				and parent_wc_product
+				and expected_variation_attributes
+			):
+				variation_verified, actual_attributes = (
+					self.ensure_woocommerce_variation_attributes(
+						woocommerce_server=(
+							item.item_woocommerce_server.woocommerce_server
+						),
+						parent_woocommerce_id=(
+							parent_wc_product.woocommerce_id
+						),
+						variation_woocommerce_id=(
+							wc_product.woocommerce_id
+						),
+						expected_attributes=(
+							expected_variation_attributes
+						),
+					)
+				)
+
+				if not variation_verified:
+					frappe.log_error(
+						title=(
+							"WooCommerce Variation Attribute "
+							"Verification Failed"
+						),
+						message=(
+							f"Server: "
+							f"{item.item_woocommerce_server.woocommerce_server}\n"
+							f"ERPNext Item: {item.item.name}\n"
+							f"WooCommerce Parent ID: "
+							f"{parent_wc_product.woocommerce_id}\n"
+							f"WooCommerce Variation ID: "
+							f"{wc_product.woocommerce_id}\n"
+							f"Expected Attributes: "
+							f"{expected_variation_attributes}\n"
+							f"Actual Attributes: "
+							f"{actual_attributes}"
+						),
+					)
+
 			# Reload ERPNext Item
 			item.item.reload()
 			item.item_woocommerce_server.woocommerce_id = wc_product.woocommerce_id
 			item.item.flags.created_by_sync = True
 			item.item.save()
 
-			self.set_sync_hash()
+			if variation_verified:
+				self.set_sync_hash()
 
 	def create_item(self, wc_product: WooCommerceProduct) -> None:
 		"""
@@ -1578,6 +1715,534 @@ class SynchroniseItem(SynchroniseWooCommerce):
 
 		return self._wc_global_term_records_cache[cache_key]
 
+
+	def _refresh_global_woocommerce_attribute_term_records(
+		self,
+		woocommerce_server: str,
+		attribute_id: int,
+	) -> list[dict]:
+		"""Reload one global WooCommerce attribute's terms and refresh both caches."""
+		cache_key = (
+			woocommerce_server,
+			int(attribute_id),
+		)
+
+		terms = self._get_all_wc_records(
+			woocommerce_server,
+			f"products/attributes/{attribute_id}/terms",
+		)
+
+		self._wc_global_term_records_cache[
+			cache_key
+		] = terms
+
+		self._wc_global_terms_cache[
+			cache_key
+		] = {
+			self._normalise_attribute_value_key(
+				term.get("name")
+			): term
+			for term in terms
+			if term.get("name")
+		}
+
+		return terms
+
+	def _find_global_woocommerce_attribute_term(
+		self,
+		woocommerce_server: str,
+		attribute_id: int,
+		value: str,
+	) -> dict | None:
+		"""
+		Find an EXISTING store-local WooCommerce global attribute term.
+
+		Matching accepts either:
+		- canonical term name;
+		- WooCommerce term slug (raw or URL-decoded).
+
+		This helper never creates a term. It is also used when verifying what
+		WooCommerce actually persisted on a variation.
+		"""
+		value = str(value or "").strip()
+
+		if not value:
+			return None
+
+		value_key = self._normalise_attribute_value_key(
+			value
+		)
+
+		terms = (
+			self._get_global_woocommerce_attribute_term_records(
+				woocommerce_server,
+				attribute_id,
+			)
+		)
+
+		# Canonical business name first.
+		for term in terms:
+			term_name = str(
+				term.get("name") or ""
+			).strip()
+
+			if (
+				term_name
+				and self._normalise_attribute_value_key(
+					term_name
+				)
+				== value_key
+			):
+				return term
+
+		# Then the exact WooCommerce store-local slug.
+		for term in terms:
+			term_slug = str(
+				term.get("slug") or ""
+			).strip()
+
+			if not term_slug:
+				continue
+
+			slug_candidates = {
+				term_slug,
+				unquote(term_slug),
+			}
+
+			for slug_candidate in slug_candidates:
+				if (
+					self._normalise_attribute_value_key(
+						slug_candidate
+					)
+					== value_key
+				):
+					return term
+
+		return None
+
+	def resolve_global_woocommerce_attribute_term(
+		self,
+		woocommerce_server: str,
+		attribute_id: int,
+		value: str,
+	) -> dict:
+		"""
+		Resolve one ERPNext business value to the exact WooCommerce term.
+
+		The term NAME is authoritative for REST variation payloads. Term IDs and
+		slugs remain WooCommerce/server-local implementation details.
+
+		Resolution order:
+		1. exact normalised term name;
+		2. decoded term slug (compatibility with old repaired data);
+		3. create the missing term by NAME and return WooCommerce's response.
+		"""
+		value = str(value or "").strip()
+
+		if not value:
+			frappe.throw(
+				_(
+					"Cannot resolve an empty WooCommerce attribute "
+					"term for attribute {0} on server {1}."
+				).format(
+					attribute_id,
+					woocommerce_server,
+				)
+			)
+
+		if term := self._find_global_woocommerce_attribute_term(
+			woocommerce_server,
+			attribute_id,
+			value,
+		):
+			return term
+
+		wc_api = self._get_wc_api_for_server(
+			woocommerce_server
+		)
+
+		response = wc_api.api.post(
+			f"products/attributes/{attribute_id}/terms",
+			data={
+				"name": value,
+			},
+		)
+
+		if response.status_code in (200, 201):
+			term = response.json()
+
+			if not isinstance(term, dict):
+				frappe.throw(
+					_(
+						"Unexpected WooCommerce term creation "
+						"response for {0} / attribute {1}: {2}"
+					).format(
+						woocommerce_server,
+						attribute_id,
+						term,
+					)
+				)
+
+			# Refresh from WooCommerce so subsequent variation creation uses
+			# exactly the value WooCommerce persisted.
+			terms = (
+				self._refresh_global_woocommerce_attribute_term_records(
+					woocommerce_server,
+					attribute_id,
+				)
+			)
+
+			if resolved := self._find_global_woocommerce_attribute_term(
+				woocommerce_server,
+				attribute_id,
+				value,
+			):
+				return resolved
+
+			if term.get("name"):
+				return term
+
+		else:
+			response_data = response.json()
+			error_code = (
+				response_data.get("code")
+				if isinstance(
+					response_data,
+					dict,
+				)
+				else ""
+			)
+
+			# A concurrent job can create the same term after our GET.
+			if "term_exists" in str(error_code):
+				terms = (
+					self._refresh_global_woocommerce_attribute_term_records(
+						woocommerce_server,
+						attribute_id,
+					)
+				)
+
+				if term := self._find_global_woocommerce_attribute_term(
+					woocommerce_server,
+					attribute_id,
+					value,
+				):
+					return term
+
+			log_and_raise_error(
+				error_text=(
+					"Unable to create/resolve WooCommerce "
+					f"attribute term {value} for attribute "
+					f"{attribute_id} on {woocommerce_server}"
+				),
+				response=response,
+			)
+
+		frappe.throw(
+			_(
+				"Unable to resolve WooCommerce term {0} for "
+				"attribute {1} on server {2}."
+			).format(
+				value,
+				attribute_id,
+				woocommerce_server,
+			)
+		)
+
+	def _variation_attribute_identity(
+		self,
+		attribute: dict,
+		woocommerce_server: str | None = None,
+	) -> tuple[str, str]:
+		"""
+		Return a stable comparison key for one variation attribute.
+
+		For global attributes, WooCommerce responses may contain either the
+		canonical term NAME or a term SLUG depending on WooCommerce version.
+		When a server is supplied, resolve both representations back to the
+		canonical term name before comparing.
+		"""
+		attribute_id = int(
+			attribute.get("id") or 0
+		)
+
+		if attribute_id:
+			identity = f"id:{attribute_id}"
+		else:
+			identity = (
+				"name:"
+				+ self._normalise_attribute_key(
+					attribute.get("name")
+				)
+			)
+
+		option = str(
+			attribute.get("option") or ""
+		).strip()
+
+		if (
+			attribute_id
+			and woocommerce_server
+			and option
+		):
+			term = (
+				self._find_global_woocommerce_attribute_term(
+					woocommerce_server,
+					attribute_id,
+					option,
+				)
+			)
+
+			if term and term.get("name"):
+				option = str(
+					term["name"]
+				).strip()
+
+		option_key = (
+			self._normalise_attribute_value_key(
+				option
+			)
+		)
+
+		return (
+			identity,
+			option_key,
+		)
+
+	def _variation_attributes_match(
+		self,
+		expected_attributes: list[dict],
+		actual_attributes: list[dict],
+		woocommerce_server: str | None = None,
+	) -> bool:
+		"""
+		Compare expected vs WooCommerce-returned variation attributes.
+
+		Global term names and exact store-local term slugs are considered the
+		same business value.
+		"""
+		expected = sorted(
+			self._variation_attribute_identity(
+				attribute,
+				woocommerce_server,
+			)
+			for attribute in (
+				expected_attributes or []
+			)
+		)
+
+		actual = sorted(
+			self._variation_attribute_identity(
+				attribute,
+				woocommerce_server,
+			)
+			for attribute in (
+				actual_attributes or []
+			)
+		)
+
+		return expected == actual
+
+	def _build_woocommerce_variation_slug_fallback_payload(
+		self,
+		woocommerce_server: str,
+		expected_attributes: list[dict],
+	) -> list[dict]:
+		"""
+		Build a compatibility payload for WooCommerce installations that fail
+		to bind non-ASCII global term NAMES during variation create/update.
+
+		The normal/documented request uses canonical term names first. Only
+		after verification proves that WooCommerce failed do we retry global
+		attributes using the EXACT term slug resolved from that store.
+
+		ERPNext never stores this slug.
+		"""
+		payload = []
+
+		for attribute in expected_attributes or []:
+			attribute_id = int(
+				attribute.get("id") or 0
+			)
+			option = str(
+				attribute.get("option") or ""
+			).strip()
+
+			if attribute_id:
+				term = (
+					self.resolve_global_woocommerce_attribute_term(
+						woocommerce_server,
+						attribute_id,
+						option,
+					)
+				)
+
+				term_slug = str(
+					term.get("slug") or ""
+				).strip()
+
+				if not term_slug:
+					frappe.throw(
+						_(
+							"WooCommerce term {0} for attribute {1} "
+							"on server {2} does not have a slug."
+						).format(
+							option,
+							attribute_id,
+							woocommerce_server,
+						)
+					)
+
+				# Decode the REST-returned percent-encoded slug before sending.
+				# Legacy WooCommerce will sanitize it back to the exact stored
+				# taxonomy slug, avoiding the broken name->slug conversion for
+				# Arabic/non-ASCII values.
+				payload.append(
+					{
+						"id": attribute_id,
+						"option": unquote(
+							term_slug
+						),
+					}
+				)
+			else:
+				payload.append(
+					{
+						"name": attribute.get(
+							"name"
+						),
+						"option": option,
+					}
+				)
+
+		return payload
+	def ensure_woocommerce_variation_attributes(
+		self,
+		woocommerce_server: str,
+		parent_woocommerce_id,
+		variation_woocommerce_id,
+		expected_attributes: list[dict],
+	) -> tuple[bool, list[dict]]:
+		"""
+		Verify the attributes WooCommerce actually stored on a variation.
+
+		If WooCommerce silently dropped one or more attributes, retry one direct
+		PUT using the already-resolved canonical payload, then verify again.
+
+		Returns:
+			(success, actual_attributes)
+		"""
+		wc_api = self._get_wc_api_for_server(
+			woocommerce_server
+		)
+
+		endpoint = (
+			f"products/{parent_woocommerce_id}"
+			f"/variations/{variation_woocommerce_id}"
+		)
+
+		def load_actual():
+			response = wc_api.api.get(
+				endpoint
+			)
+
+			if response.status_code != 200:
+				log_and_raise_error(
+					error_text=(
+						"Unable to verify WooCommerce "
+						f"variation {variation_woocommerce_id} "
+						f"under parent {parent_woocommerce_id} "
+						f"on {woocommerce_server}"
+					),
+					response=response,
+				)
+
+			record = response.json()
+
+			if not isinstance(
+				record,
+				dict,
+			):
+				frappe.throw(
+					_(
+						"Unexpected WooCommerce variation "
+						"verification response for {0}."
+					).format(
+						variation_woocommerce_id
+					)
+				)
+
+			return list(
+				record.get("attributes")
+				or []
+			)
+
+		actual_attributes = load_actual()
+
+		if self._variation_attributes_match(
+			expected_attributes,
+			actual_attributes,
+			woocommerce_server,
+		):
+			return (
+				True,
+				actual_attributes,
+			)
+
+		# The documented name-based request has already failed verification.
+		# Retry once using the EXACT store-local WooCommerce term slug for
+		# global attributes. This is a compatibility fallback for WooCommerce
+		# versions affected by the non-ASCII variation attribute bug.
+		fallback_attributes = (
+			self._build_woocommerce_variation_slug_fallback_payload(
+				woocommerce_server,
+				expected_attributes,
+			)
+		)
+
+		response = wc_api.api.put(
+			endpoint,
+			data={
+				"attributes": (
+					fallback_attributes
+				)
+			},
+		)
+
+		if response.status_code != 200:
+			log_and_raise_error(
+				error_text=(
+					"Unable to repair WooCommerce "
+					f"variation attributes for "
+					f"{variation_woocommerce_id} "
+					f"on {woocommerce_server}"
+				),
+				response=response,
+			)
+
+		repair_record = response.json()
+
+		if (
+			isinstance(repair_record, dict)
+			and repair_record.get("date_modified")
+			and self.woocommerce_product
+		):
+			# Keep the sync hash aligned with the final direct repair PUT,
+			# not the earlier insert/save timestamp.
+			self.woocommerce_product.woocommerce_date_modified = (
+				repair_record["date_modified"]
+			)
+
+		actual_attributes = load_actual()
+
+		return (
+			self._variation_attributes_match(
+				expected_attributes,
+				actual_attributes,
+				woocommerce_server,
+			),
+			actual_attributes,
+		)
 	def _resolve_inbound_woocommerce_attribute_option(
 		self,
 		wc_product: WooCommerceProduct,

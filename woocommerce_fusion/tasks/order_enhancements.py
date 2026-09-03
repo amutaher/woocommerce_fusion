@@ -226,29 +226,44 @@ def _get_refund_quantity_source_label(wc_server) -> str:
 	return "Sales Order returned_qty"
 
 
-def queue_refund_from_sales_order(doc, method=None):
-	"""
-	Queue full return/reservation/refund reconciliation on any submitted
-	WooCommerce-linked Sales Order change.
+def queue_refund_from_sales_order(
+    doc,
+    method=None,
+):
+    """
+    Queue return / reservation / refund reconciliation
+    on submitted WooCommerce-linked Sales Order changes.
 
-	The actual work runs after commit and is deduplicated by Sales Order.
-	"""
-	if (
-		doc.doctype != "Sales Order"
-		or doc.docstatus != 1
-		or not doc.woocommerce_id
-		or not doc.woocommerce_server
-	):
-		return
+    If the controller already queued a status synchronization,
+    the status job will queue this reconciliation AFTER Woo
+    confirms the new status.
+    """
 
-	wc_server = frappe.get_cached_doc(
-		"WooCommerce Server",
-		doc.woocommerce_server,
-	)
-	if not wc_server.enable_sync:
-		return
+    if (
+        doc.doctype != "Sales Order"
+        or doc.docstatus != 1
+        or not doc.woocommerce_id
+        or not doc.woocommerce_server
+    ):
+        return
 
-	_enqueue_sales_order_reconciliation(doc.name)
+    wc_server = frappe.get_cached_doc(
+        "WooCommerce Server",
+        doc.woocommerce_server,
+    )
+
+    if not wc_server.enable_sync:
+        return
+
+    # Prevent two jobs from competing for the same Sales Order.
+    if doc.flags.get(
+        "woocommerce_status_sync_queued"
+    ):
+        return
+
+    _enqueue_sales_order_reconciliation(
+        doc.name
+    )
 
 
 def queue_refund_from_sales_invoice(doc, method=None):
