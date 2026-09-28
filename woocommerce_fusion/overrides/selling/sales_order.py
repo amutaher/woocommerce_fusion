@@ -8,96 +8,345 @@ from frappe.model.naming import get_default_naming_series, make_autoname
 
 from woocommerce_fusion.tasks.sync_sales_orders import run_sales_order_sync
 from woocommerce_fusion.woocommerce.woocommerce_api import (
-	generate_woocommerce_record_name_from_domain_and_id,
+    generate_woocommerce_record_name_from_domain_and_id,
 )
 from frappe.utils import add_days, cint, cstr, flt, get_link_to_form, getdate, nowdate, strip_html
 
 from woocommerce_fusion.tasks.order_status_sync import (
-			sales_order_status_sync_required,
-			sync_sales_order_status_and_reconciliation,
-		)
+    sales_order_status_sync_required,
+    sync_sales_order_status_and_reconciliation,
+)
 
 
 class CustomSalesOrder(SalesOrder):
-	"""
-	This class extends ERPNext's Sales Order doctype to override the autoname method
-	This allows us to name the Sales Order conditionally.
+    """
+    This class extends ERPNext's Sales Order doctype to override the autoname method
+    This allows us to name the Sales Order conditionally.
 
-	We also add logic to set the WooCommerce Status field on validate.
-	"""
+    We also add logic to set the WooCommerce Status field on validate.
+    """
 
-	def autoname(self):
-			"""
-			If this is a WooCommerce-linked order, use the naming series defined in "WooCommerce Server"
-			or default to WEB[WooCommerce Order ID], e.g. WEB012142.
-			Else, name it normally.
-			"""
-			if self.woocommerce_id and self.woocommerce_server:
-				wc_server = frappe.get_cached_doc("WooCommerce Server", self.woocommerce_server)
-				if wc_server.sales_order_series:
-					self.name = make_autoname(key=wc_server.sales_order_series)
-				else:
-					if wc_server.custom_naming_series_prefix:
-						self.name = f"{wc_server.custom_naming_series_prefix}-{int(self.woocommerce_id):06}"
-					else:
-						# Get idx of site
-						wc_servers = frappe.get_all("WooCommerce Server", fields=["name", "creation"])
-						sorted_list = sorted(wc_servers, key=lambda server: server.creation)
-						idx = next(
-							(index for (index, d) in enumerate(sorted_list) if d["name"] == self.woocommerce_server),
-							None,
-						)
-						self.name = f"WEB{idx + 1}-{int(self.woocommerce_id):06}"  # Format with leading zeros to make it 6 digits
-			else:
-				naming_series = get_default_naming_series("Sales Order")
-				self.name = make_autoname(key=naming_series)
+    def autoname(self):
+        """
+        If this is a WooCommerce-linked order, use the naming series defined in "WooCommerce Server"
+        or default to WEB[WooCommerce Order ID], e.g. WEB012142.
+        Else, name it normally.
+        """
+        if self.woocommerce_id and self.woocommerce_server:
+            wc_server = frappe.get_cached_doc("WooCommerce Server", self.woocommerce_server)
+            if wc_server.sales_order_series:
+                self.name = make_autoname(key=wc_server.sales_order_series)
+            else:
+                if wc_server.custom_naming_series_prefix:
+                    self.name = f"{wc_server.custom_naming_series_prefix}-{int(self.woocommerce_id):06}"
+                else:
+                    # Get idx of site
+                    wc_servers = frappe.get_all("WooCommerce Server", fields=["name", "creation"])
+                    sorted_list = sorted(wc_servers, key=lambda server: server.creation)
+                    idx = next(
+                        (index for (index, d) in enumerate(sorted_list) if d["name"] == self.woocommerce_server),
+                        None,
+                    )
+                    self.name = f"WEB{idx + 1}-{int(self.woocommerce_id):06}"  # Format with leading zeros to make it 6 digits
+        else:
+            naming_series = get_default_naming_series("Sales Order")
+            self.name = make_autoname(key=naming_series)
 
-	def on_change(self):
-		"""
-		Handle ERPNext -> WooCommerce Sales Order status synchronization.
+    def on_change(self):
+        """
+        Handle ERPNext -> WooCommerce Sales Order status synchronization.
 
-		Important:
-		woocommerce_status represents the LAST CONFIRMED WooCommerce
-		status. Never write the intended status before WooCommerce
-		confirms it.
-		"""
-		if (
-			self.flags.get("created_by_sync")
-			or not self.woocommerce_id
-			or not self.woocommerce_server
-		):
-			return
+        Important:
+        woocommerce_status represents the LAST CONFIRMED WooCommerce
+        status. Never write the intended status before WooCommerce
+        confirms it.
+        """
+        if (
+            self.flags.get("created_by_sync")
+            or not self.woocommerce_id
+            or not self.woocommerce_server
+        ):
+            return
 
-		wc_server = frappe.get_cached_doc(
-			"WooCommerce Server",
-			self.woocommerce_server,
-		)
+        wc_server = frappe.get_cached_doc(
+            "WooCommerce Server",
+            self.woocommerce_server,
+        )
 
-		if not wc_server.enable_sync:
-			return
+        if not wc_server.enable_sync:
+            return
 
-		status_required = (
-	        sales_order_status_sync_required(
-	            self
-	        )
-	    )
+        status_required = sales_order_status_sync_required(self)
 
-		if not status_required:
-			return
+        if not status_required:
+            return
 
-		frappe.enqueue(
-	        sync_sales_order_status_and_reconciliation,
-	        queue="long",
-	        enqueue_after_commit=True,
-	        sales_order_name=self.name,
-	        run_reconciliation_after=(
-	            self.docstatus == 1
-	        ),
-	    )
+        frappe.enqueue(
+            sync_sales_order_status_and_reconciliation,
+            queue="long",
+            enqueue_after_commit=True,
+            sales_order_name=self.name,
+            run_reconciliation_after=(self.docstatus == 1),
+        )
 
-	    # Used by the doc_event handler below so it does not queue
-	    # a competing reconciliation job for this same change.
-		self.flags.woocommerce_status_sync_queued = True
+        # Used by the doc_event handler below so it does not queue
+        # a competing reconciliation job for this same change.
+        self.flags.woocommerce_status_sync_queued = True
+
+    def _get_return_adjusted_progress(self):
+        """
+        Calculate Sales Order progress after treating returned_qty as a
+        permanent reduction of the quantity/amount that still needs to be
+        delivered and billed.
+
+        This keeps ERPNext's standard status engine. We only correct the
+        progress values used by that engine when the Sales Order contains
+        returned quantities.
+        """
+
+        has_returns = False
+
+        total_original_qty = 0.0
+        total_effective_qty = 0.0
+        total_delivered_qty = 0.0
+
+        total_original_amount = 0.0
+        total_effective_amount = 0.0
+        total_billed_amount = 0.0
+
+        for item in self.items:
+            qty = abs(
+                flt(
+                    item.qty,
+                    item.precision("qty"),
+                )
+            )
+
+            returned_qty = abs(
+                flt(
+                    item.returned_qty,
+                    item.precision("returned_qty"),
+                )
+            )
+
+            delivered_qty = abs(
+                flt(
+                    item.delivered_qty,
+                    item.precision("delivered_qty"),
+                )
+            )
+
+            amount = abs(
+                flt(
+                    item.amount,
+                    item.precision("amount"),
+                )
+            )
+
+            billed_amt = abs(
+                flt(
+                    item.billed_amt,
+                    item.precision("billed_amt"),
+                )
+            )
+
+            if returned_qty > 0:
+                has_returns = True
+
+            accepted_return_qty = min(
+                returned_qty,
+                qty,
+            )
+
+            effective_qty = max(
+                qty - accepted_return_qty,
+                0.0,
+            )
+
+            total_original_qty += qty
+            total_effective_qty += effective_qty
+
+            total_delivered_qty += min(
+                delivered_qty,
+                effective_qty,
+            )
+
+            total_original_amount += amount
+
+            if qty > 0:
+                effective_amount = (
+                    amount
+                    * effective_qty
+                    / qty
+                )
+            else:
+                effective_amount = amount
+
+            total_effective_amount += effective_amount
+
+            total_billed_amount += min(
+                billed_amt,
+                effective_amount,
+            )
+
+        if not has_returns:
+            return None
+
+        if total_effective_qty > 0:
+            per_delivered = (
+                total_delivered_qty
+                / total_effective_qty
+                * 100
+            )
+        elif total_original_qty > 0:
+            per_delivered = 100.0
+        else:
+            per_delivered = flt(
+                self.per_delivered
+            )
+
+        if total_effective_amount > 0:
+            per_billed = (
+                total_billed_amount
+                / total_effective_amount
+                * 100
+            )
+        elif total_original_amount > 0:
+            per_billed = 100.0
+        else:
+            per_billed = flt(
+                self.per_billed
+            )
+
+        return {
+            "per_delivered": min(
+                max(
+                    round(
+                        per_delivered,
+                        6,
+                    ),
+                    0.0,
+                ),
+                100.0,
+            ),
+            "per_billed": min(
+                max(
+                    round(
+                        per_billed,
+                        6,
+                    ),
+                    0.0,
+                ),
+                100.0,
+            ),
+        }
+
+    def set_status(
+        self,
+        update=False,
+        status=None,
+        update_modified=True,
+    ):
+        """
+        Preserve ERPNext's standard Sales Order status calculation while
+        making per_delivered and per_billed return-aware.
+
+        Orders without returned_qty use ERPNext behavior unchanged.
+        Draft and Cancelled documents use ERPNext behavior unchanged.
+        ERPNext's standard set_status() still determines the actual status.
+        """
+
+        progress = None
+
+        if self.docstatus == 1:
+            progress = (
+                self._get_return_adjusted_progress()
+            )
+
+        if progress:
+            per_delivered = progress[
+                "per_delivered"
+            ]
+
+            per_billed = progress[
+                "per_billed"
+            ]
+
+            if self.skip_delivery_note:
+                delivery_status = (
+                    self.delivery_status
+                    or "Not Applicable"
+                )
+            elif per_delivered < 0.001:
+                delivery_status = (
+                    "Not Delivered"
+                )
+            elif per_delivered >= 99.999999:
+                delivery_status = (
+                    "Fully Delivered"
+                )
+            else:
+                delivery_status = (
+                    "Partly Delivered"
+                )
+
+            if per_billed < 0.001:
+                billing_status = (
+                    "Not Billed"
+                )
+            elif per_billed >= 99.999999:
+                billing_status = (
+                    "Fully Billed"
+                )
+            else:
+                billing_status = (
+                    "Partly Billed"
+                )
+
+            self.per_delivered = (
+                per_delivered
+            )
+            self.per_billed = (
+                per_billed
+            )
+            self.delivery_status = (
+                delivery_status
+            )
+            self.billing_status = (
+                billing_status
+            )
+
+            if (
+                update
+                and not self.is_new()
+            ):
+                frappe.db.set_value(
+                    "Sales Order",
+                    self.name,
+                    {
+                        "per_delivered": (
+                            per_delivered
+                        ),
+                        "per_billed": (
+                            per_billed
+                        ),
+                        "delivery_status": (
+                            delivery_status
+                        ),
+                        "billing_status": (
+                            billing_status
+                        ),
+                    },
+                    update_modified=False,
+                )
+
+        return super().set_status(
+            update=update,
+            status=status,
+            update_modified=(
+                update_modified
+            ),
+        )
 
 
 @frappe.whitelist()

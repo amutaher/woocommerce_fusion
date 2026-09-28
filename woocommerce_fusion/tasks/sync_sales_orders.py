@@ -6,7 +6,7 @@ from erpnext.selling.doctype.sales_order.sales_order import SalesOrder
 from erpnext.selling.doctype.sales_order_item.sales_order_item import SalesOrderItem
 from frappe import _
 from frappe.utils import get_datetime
-from frappe.utils.data import cstr, now
+from frappe.utils.data import cstr, flt, now
 from jsonpath_ng.ext import parse
 
 from woocommerce_fusion.exceptions import (
@@ -23,6 +23,56 @@ from woocommerce_fusion.woocommerce.doctype.woocommerce_order.woocommerce_order 
 from woocommerce_fusion.woocommerce.woocommerce_api import (
 	generate_woocommerce_record_name_from_domain_and_id,
 )
+
+
+ORDER_LINE_ID_FIELD = "custom_woocommerce_order_line_id"
+WOOCOMMERCE_REDUCED_STOCK_META_KEY = "_reduced_stock"
+
+
+def _get_woocommerce_order_line_product_id(line_item: dict) -> str:
+	"""Return the effective WooCommerce product ID for an order line.
+
+	For a variation WooCommerce stores:
+	- product_id   = parent product ID
+	- variation_id = variation ID
+
+	ERP Item WooCommerce mappings point to the variation ID, so variation_id
+	must take precedence over product_id.
+	"""
+	return cstr(
+		line_item.get("variation_id")
+		or line_item.get("product_id")
+	)
+
+
+def _sanitize_metadata_for_recreated_line(meta_data) -> list[dict]:
+	"""Prepare copied WooCommerce line metadata for a newly-created line.
+
+	Never copy WooCommerce's internal _reduced_stock marker. That marker
+	represents stock already reduced for the OLD order line and copying it to a
+	new line can corrupt WooCommerce's stock bookkeeping.
+
+	Metadata IDs and display-only keys also belong to the existing Woo line, so
+	only key/value pairs are carried to the recreated line.
+	"""
+	cleaned = []
+
+	for entry in meta_data or []:
+		if not isinstance(entry, dict):
+			continue
+
+		key = cstr(entry.get("key"))
+		if not key or key == WOOCOMMERCE_REDUCED_STOCK_META_KEY:
+			continue
+
+		cleaned.append(
+			{
+				"key": key,
+				"value": entry.get("value"),
+			}
+		)
+
+	return cleaned
 
 
 def run_sales_order_sync_from_hook(doc, method):
@@ -364,11 +414,19 @@ class SynchroniseSalesOrder(SynchroniseWooCommerce):
 
 	def update_woocommerce_order(self, wc_order: WooCommerceOrder, sales_order: SalesOrder) -> None:
 		"""
-		Update the WooCommerce Order with fields from it's corresponding ERPNext Sales Order
+		Update the WooCommerce Order with fields from its corresponding ERPNext Sales Order.
+
+		Important stock-safety rules:
+		- Woo variations are matched by variation_id before product_id.
+		- Existing Woo line IDs are used when available.
+		- Unchanged variation lines are never falsely treated as changed just
+		  because Woo product_id contains the parent product ID.
+		- If the legacy replacement path is genuinely required, WooCommerce's
+		  internal _reduced_stock metadata is never copied to the new line.
 		"""
 		wc_order_dirty = False
 
-		# Update the woocommerce_status field if necessary
+		# Update the woocommerce_status field if necessary.
 		sales_order_wc_status = (
 			WC_ORDER_STATUS_MAPPING[sales_order.woocommerce_status]
 			if sales_order.woocommerce_status
@@ -378,7 +436,7 @@ class SynchroniseSalesOrder(SynchroniseWooCommerce):
 			wc_order.status = sales_order_wc_status
 			wc_order_dirty = True
 
-		# Get the Item WooCommerce ID's
+		# Get the exact WooCommerce ID for each ERP Item on this server.
 		for so_item in sales_order.items:
 			so_item.woocommerce_id = frappe.get_value(
 				"Item WooCommerce Server",
@@ -389,54 +447,184 @@ class SynchroniseSalesOrder(SynchroniseWooCommerce):
 				fieldname="woocommerce_id",
 			)
 
-		# Update the line_items field if necessary
-		wc_server = frappe.get_cached_doc("WooCommerce Server", wc_order.woocommerce_server)
+		# Update line_items only when a REAL order-item difference exists.
+		wc_server = frappe.get_cached_doc(
+			"WooCommerce Server",
+			wc_order.woocommerce_server,
+		)
 		if wc_server.sync_so_items_to_wc:
-			sales_order_items_changed = False
 			line_items = json.loads(wc_order.line_items)
-			# Check if count of line items are different
-			if len(line_items) != len(sales_order.items):
-				sales_order_items_changed = True
-			# Check if any line item properties changed
-			else:
-				for i, so_item in enumerate(sales_order.items):
-					if not so_item.woocommerce_id:
-						break
-					elif (
-						int(so_item.woocommerce_id) != line_items[i]["product_id"]
-						or so_item.qty != line_items[i]["quantity"]
-						or so_item.rate != get_tax_inc_price_for_woocommerce_line_item(line_items[i])
+			matched_lines = self._match_sales_order_items_to_woocommerce_lines(
+				sales_order=sales_order,
+				line_items=line_items,
+			)
+
+			sales_order_items_changed = matched_lines is None
+
+			if matched_lines is not None:
+				for so_item, remote_line in matched_lines:
+					remote_qty = flt(remote_line.get("quantity"))
+					remote_rate = flt(
+						get_tax_inc_price_for_woocommerce_line_item(
+							remote_line
+						)
+					)
+
+					if (
+						abs(flt(so_item.qty) - remote_qty) > 0.000001
+						or abs(flt(so_item.rate) - remote_rate) > 0.000001
 					):
 						sales_order_items_changed = True
 						break
 
 			if sales_order_items_changed:
-				# Build the correct lines
-				new_line_items = [
-					{
+				# Preserve metadata only from a line that belongs to the same
+				# logical product/variation. Never copy _reduced_stock.
+				matched_by_row_name = {
+					so_item.name: remote_line
+					for so_item, remote_line in (matched_lines or [])
+				}
+
+				new_line_items = []
+				for i, so_item in enumerate(sales_order.items):
+					source_line = matched_by_row_name.get(so_item.name)
+
+					# If the full match failed because the structure really changed,
+					# use the same-position line only when it represents the same
+					# product/variation. This avoids copying metadata across products.
+					if (
+						source_line is None
+						and i < len(line_items)
+						and _get_woocommerce_order_line_product_id(line_items[i])
+						== cstr(so_item.woocommerce_id)
+					):
+						source_line = line_items[i]
+
+					line_item = {
 						"product_id": so_item.woocommerce_id,
 						"quantity": so_item.qty,
 						"price": so_item.rate,
-						"meta_data": line_items[i].get("meta_data", []) if i < len(line_items) else [],
+						"meta_data": _sanitize_metadata_for_recreated_line(
+							(source_line or {}).get("meta_data", [])
+						),
 					}
-					for i, so_item in enumerate(sales_order.items)
-				]
-				# Process Order Item Line Field Mappings
-				for i, line_item in enumerate(new_line_items):
-					self.set_wc_order_line_items_mapped_fields(line_item, sales_order.items[i])
 
-				# Set the product_id for existing lines to null, to clear the line items for the WooCommerce order
+					# Process configured Order Item Line Field Mappings.
+					self.set_wc_order_line_items_mapped_fields(
+						line_item,
+						so_item,
+					)
+					new_line_items.append(line_item)
+
+				# Preserve the existing app behavior for genuine structural/order-line
+				# changes, but execute it only after variation-aware comparison.
+				# Existing lines are cleared, then the desired lines are created.
 				replacement_line_items = [
-					{"id": line_item["id"], "product_id": None}
-					for line_item in json.loads(wc_order.line_items)
+					{
+						"id": line_item["id"],
+						"product_id": None,
+					}
+					for line_item in line_items
+					if line_item.get("id")
 				]
 				replacement_line_items.extend(new_line_items)
 
-				wc_order.line_items = json.dumps(replacement_line_items)
+				wc_order.line_items = json.dumps(
+					replacement_line_items
+				)
 				wc_order_dirty = True
 
 		if wc_order_dirty:
 			wc_order.save()
+
+	def _match_sales_order_items_to_woocommerce_lines(
+		self,
+		sales_order: SalesOrder,
+		line_items: list[dict],
+	) -> list[tuple[SalesOrderItem, dict]] | None:
+		"""
+		Match ERP Sales Order Items to existing WooCommerce order lines.
+
+		The match order is:
+		1. Stored Woo order-line ID, when available.
+		2. Exact effective Woo product ID:
+		   variation_id for variations, otherwise product_id.
+		3. Same-position fallback only when the effective product ID matches.
+
+		Returns None when the current Woo/ERP line structures genuinely differ.
+		"""
+		if len(line_items) != len(sales_order.items):
+			return None
+
+		used_line_ids: set[str] = set()
+		matched_lines: list[tuple[SalesOrderItem, dict]] = []
+
+		for index, so_item in enumerate(sales_order.items):
+			woocommerce_id = cstr(so_item.woocommerce_id)
+			if not woocommerce_id:
+				return None
+
+			remote_line = None
+			stored_line_id = cstr(
+				so_item.get(ORDER_LINE_ID_FIELD)
+			)
+
+			# Prefer the immutable Woo order-line ID when we have it.
+			if stored_line_id:
+				remote_line = next(
+					(
+						line
+						for line in line_items
+						if cstr(line.get("id")) == stored_line_id
+						and cstr(line.get("id")) not in used_line_ids
+					),
+					None,
+				)
+
+				# A stale stored line ID must never force a false match.
+				if (
+					remote_line
+					and _get_woocommerce_order_line_product_id(remote_line)
+					!= woocommerce_id
+				):
+					remote_line = None
+
+			# Fall back to the logical Woo product/variation ID.
+			if remote_line is None:
+				product_matches = [
+					line
+					for line in line_items
+					if _get_woocommerce_order_line_product_id(line)
+					== woocommerce_id
+					and cstr(line.get("id")) not in used_line_ids
+				]
+
+				if len(product_matches) == 1:
+					remote_line = product_matches[0]
+				elif index < len(line_items):
+					index_line = line_items[index]
+					if (
+						_get_woocommerce_order_line_product_id(index_line)
+						== woocommerce_id
+						and cstr(index_line.get("id")) not in used_line_ids
+					):
+						remote_line = index_line
+
+			if remote_line is None:
+				return None
+
+			remote_line_id = cstr(remote_line.get("id"))
+			if remote_line_id:
+				used_line_ids.add(remote_line_id)
+
+			matched_lines.append(
+				(
+					so_item,
+					remote_line,
+				)
+			)
+
+		return matched_lines
 
 	def set_wc_order_line_items_mapped_fields(
 		self, woocommerce_order_line_item: dict, so_item: SalesOrderItem
@@ -700,6 +888,7 @@ class SynchroniseSalesOrder(SynchroniseWooCommerce):
 				"rate": rate,
 				"warehouse": wc_server.warehouse,
 				"discount_percentage": 100 if item.get("price") == 0 else 0,
+				ORDER_LINE_ID_FIELD: cstr(item.get("id")),
 			}
 
 			# Process Order Item Line Field Mappings
