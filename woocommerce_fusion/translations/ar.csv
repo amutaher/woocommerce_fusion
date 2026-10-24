@@ -1,0 +1,88 @@
+﻿Sarea Wallet Charge Request,طلب شحن رصيد
+Sarea Charge Request,طلب شحن سارع
+Charge Request ID,معرّف طلب الشحن
+Sarea Status,حالة سارع
+Original Currency,العملة الأصلية
+Original Amount,المبلغ الأصلي
+Exchange Rate Snapshot,سعر الصرف وقت العملية
+Sarea User ID,معرّف مستخدم سارع
+Payment Method,طريقة الدفع
+Origin Blog ID,معرّف المتجر المصدر
+Created At (Sarea),تاريخ الإنشاء في سارع
+Payment Entry Created,تم إنشاء قيد الدفع
+ERPNext Decision,قرار ERPNext
+Decision State,حالة القرار
+Decision,القرار
+Decision Reason / Notes,سبب القرار / الملاحظات
+Decision By,اتخذ القرار بواسطة
+Decision Started At,وقت بدء القرار
+Decision Completed At,وقت اكتمال القرار
+Decision Attempts,محاولات تنفيذ القرار
+Wallet Result,نتيجة المحفظة
+Transaction ID,معرّف العملية
+Voucher Number,رقم السند
+Balance After,الرصيد بعد العملية
+Idempotent Replay,إعادة تنفيذ آمنة لنفس الطلب
+Last HTTP Status,آخر حالة HTTP
+Last Response Code,آخر رمز استجابة
+Retry-After,إعادة المحاولة بعد
+Last Sync On,آخر مزامنة في
+Technical / Audit,تقني / تدقيق
+Idempotency Key,مفتاح منع التكرار
+Exact Decision Payload,بيانات القرار المرسلة حرفيًا
+Last API Response,آخر استجابة من API
+Last Integration Error,آخر خطأ تكامل
+Internal ERPNext Notes,ملاحظات ERPNext الداخلية
+Payment Methods Mapping,ربط طرق الدفع
+Woo Payment Method,طريقة الدفع في WooCommerce
+Require Payment Entry Before Approve,اشتراط إنشاء سند قبض قبل الموافقة
+Payment Entry Remarks Template,قالب بيان سند القبض
+"When enabled, Approve is blocked until one matching non-cancelled Payment Entry exists for the Charge Request.","عند التفعيل، سيتم منع الموافقة حتى يوجد قيد دفع مطابق وغير ملغى لطلب شحن الرصيد."
+"Jinja template. Use direct Charge Request fields such as {{ amount_usd }}, {{ customer }}, {{ payment_method }}, or conditions such as {% if payment_method == ""bank_transfer"" %}...{% endif %}. You may also use doc.fieldname, for example {{ doc.reference }}.","قالب Jinja. يمكنك استخدام حقول طلب شحن الرصيد مباشرة مثل {{ amount_usd }} و{{ customer }} و{{ payment_method }}، أو استخدام شروط مثل {% if payment_method == ""bank_transfer"" %}...{% endif %}. ويمكن أيضًا استخدام doc.fieldname، مثل {{ doc.reference }}."
+Sync From Sarea,مزامنة من سارع
+Create / Open Payment Entry,إنشاء / فتح قيد الدفع
+Preparing Payment Entry...,جارٍ تجهيز قيد الدفع...
+Accounting,المحاسبة
+Approve,موافقة
+Reject,رفض
+Retry Same Decision,إعادة محاولة نفس القرار
+Retry using the exact same persisted Idempotency-Key and JSON payload?,هل تريد إعادة المحاولة باستخدام نفس مفتاح منع التكرار ونفس بيانات JSON المحفوظة حرفيًا؟
+{0} Charge Request {1},{0} طلب شحن الرصيد {1}
+"This changes the authoritative Sarea Wallet request. Amount, customer, store and payment method are not sent back.",سيؤدي هذا إلى تغيير طلب محفظة سارع المعتمد. لن يتم إعادة إرسال المبلغ أو العميل أو المتجر أو طريقة الدفع.
+Wallet Decision Completed,اكتمل قرار المحفظة
+Retry Required,مطلوب إعادة المحاولة
+Wallet Decision Not Completed,لم يكتمل قرار المحفظة
+The Sarea Wallet decision completed successfully.,اكتمل تنفيذ قرار محفظة سارع بنجاح.
+Unknown integration error,خطأ تكامل غير معروف
+Pending,قيد الانتظار
+Processing,قيد المعالجة
+Processed,تمت المعالجة
+Rejected,مرفوض
+Sync Active Requests,مزامنة الطلبات النشطة
+Sync Pending From Sarea,تحديث الطلبات المعلقة من سارع
+Import / Sync All,استيراد / مزامنة الكل
+Sync all charge-request statuses from Sarea Wallet?,هل تريد مزامنة جميع حالات طلبات شحن الرصيد من محفظة سارع؟
+Synchronized {0} request rows.,تمت مزامنة {0} من طلبات شحن الرصيد.
+Refreshing pending charge requests from Sarea...,جارٍ تحديث طلبات شحن الرصيد المعلقة من سارع...
+Checked {0} pending requests; {1} status updates found.,تم فحص {0} طلبات معلقة؛ وتم العثور على {1} تحديثات للحالة.
+Test Connection,اختبار الاتصال
+Testing Sarea Wallet API...,جارٍ اختبار الاتصال بواجهة محفظة سارع...
+Connection Successful,تم الاتصال بنجاح
+Connection Failed,فشل الاتصال
+Sarea Wallet API responded successfully.,استجابت واجهة محفظة سارع بنجاح.
+Unknown API error,خطأ API غير معروف
+Timeout Seconds must be at least 1.,يجب ألا تقل مهلة الاتصال بالثواني عن 1.
+Decision must be approve or reject.,يجب أن يكون القرار موافقة أو رفض.
+Decision notes/reason are required.,سبب القرار / الملاحظات مطلوبة.
+Decision notes cannot exceed 4000 characters.,لا يمكن أن تتجاوز ملاحظات القرار 4000 حرف.
+A persisted decision already exists. Use Retry Same Decision.,يوجد قرار محفوظ مسبقًا. استخدم إعادة محاولة نفس القرار.
+No persisted decision exists to retry.,لا يوجد قرار محفوظ لإعادة المحاولة.
+This decision is already completed.,تم تنفيذ هذا القرار بالفعل.
+Persisted decision payload is invalid.,بيانات القرار المحفوظة غير صالحة.
+Please set Company in Sarea Wallet Settings before creating a Payment Entry.,يرجى تحديد الشركة في إعدادات محفظة سارع قبل إنشاء قيد الدفع.
+ERPNext Customer is required before creating a Payment Entry.,يجب تحديد عميل ERPNext قبل إنشاء قيد الدفع.
+Mode of Payment is required before creating a Payment Entry.,يجب تحديد طريقة الدفع قبل إنشاء قيد الدفع.
+This feature currently expects the Customer Receivable account currency to equal the Company currency.,تتطلب هذه الميزة حاليًا أن تكون عملة حساب ذمم العميل مطابقة لعملة الشركة.
+Received Amount must equal Paid Amount when the mapped Mode of Payment account uses the Company currency.,يجب أن يساوي المبلغ المستلم المبلغ المدفوع عندما يستخدم حساب طريقة الدفع المرتبط عملة الشركة.
+A Payment Entry must be created before approving this Sarea Wallet Charge Request.,يجب إنشاء قيد دفع قبل الموافقة على طلب شحن رصيد محفظة سارع.
+Company is required in Sarea Wallet Settings because Require Payment Entry Before Approve is enabled.,الشركة مطلوبة في إعدادات محفظة سارع لأن خيار اشتراط إنشاء قيد دفع قبل الموافقة مفعّل.

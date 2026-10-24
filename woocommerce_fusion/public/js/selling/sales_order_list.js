@@ -152,4 +152,74 @@ frappe.listview_settings["Sales Order"] = {
       );
     });
   },
+  onload(listview) {
+  	const allowed_roles = [
+  		"Sales Manager",
+  		"System Manager",
+  	];
+  
+  	const can_sync = (
+  		frappe.session.user === "Administrator"
+  		|| allowed_roles.some(
+  			(role) => frappe.user_roles.includes(role)
+  		)
+  	);
+  
+  	if (!can_sync) {
+  		return;
+  	}
+  
+  	listview.page.add_inner_button(
+  		__("Sync WooCommerce Orders Now"),
+  		() => {
+  			frappe.confirm(
+  				__(
+  					"This will check WooCommerce for orders modified "
+  					+ "since the last synchronization and queue any "
+  					+ "pending order synchronization. Continue?"
+  				),
+  				() => {
+  					frappe.call({
+  						method:
+  							"woocommerce_fusion.tasks."
+  							+ "sync_sales_orders."
+  							+ "enqueue_manual_woocommerce_order_sync",
+            
+  						freeze: true,
+            
+  						freeze_message: __(
+  							"Starting WooCommerce order synchronization..."
+  						),
+            
+  						callback(r) {
+  							if (
+  								!r.exc
+  								&& r.message
+  								&& r.message.queued
+  							) {
+  								const last_sync =
+  									r.message.last_sync_date
+  									|| __("Not available");
+                
+  								frappe.show_alert(
+  									{
+  										message: __(
+  											"WooCommerce order synchronization "
+  											+ "has been queued. "
+  											+ "Last synchronization: {0}",
+  											[last_sync]
+  										),
+  										indicator: "green",
+  									},
+  									7
+  								);
+  							}
+  						},
+  					});
+  				}
+  			);
+  		},
+  		__("WooCommerce")
+  	);
+  },
 };

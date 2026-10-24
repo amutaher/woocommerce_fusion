@@ -1,0 +1,398 @@
+{
+ "actions": [],
+ "autoname": "format:SWCR-{charge_request_id}",
+ "creation": "2026-09-28 20:38:31.069221",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "request_section",
+  "customer",
+  "amount_usd",
+  "currency",
+  "payment_method",
+  "mode_of_payment",
+  "column_break_request",
+  "reference",
+  "original_currency",
+  "original_amount",
+  "exchange_rate_snapshot",
+  "column_break_zanc",
+  "charge_request_id",
+  "sarea_user_id",
+  "status",
+  "notes",
+  "blog_id",
+  "decision_section",
+  "decision_state",
+  "decision",
+  "column_break_decision",
+  "decision_by",
+  "decision_notes",
+  "integration_section",
+  "transaction_id",
+  "voucher_number",
+  "balance_after",
+  "idempotent_replay",
+  "column_break_integration",
+  "last_http_status",
+  "last_response_code",
+  "retry_after",
+  "last_sync_on",
+  "payment_entry_section",
+  "column_break_jmud",
+  "sarea_created_at",
+  "decision_started_at",
+  "decision_completed_at",
+  "decision_attempts",
+  "column_break_3jyg",
+  "payment_entry_created",
+  "internal_notes",
+  "technical_section",
+  "decision_idempotency_key",
+  "decision_payload",
+  "last_response_json",
+  "last_error"
+ ],
+ "fields": [
+  {
+   "fieldname": "request_section",
+   "fieldtype": "Section Break",
+   "label": "Sarea Charge Request"
+  },
+  {
+   "bold": 1,
+   "fieldname": "charge_request_id",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Charge Request ID",
+   "read_only": 1,
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Sarea Status",
+   "options": "\npending\nprocessing\nprocessed\nrejected\nfailed",
+   "read_only": 1
+  },
+  {
+   "fieldname": "amount_usd",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Amount",
+   "options": "currency",
+   "precision": "2",
+   "read_only": 1
+  },
+  {
+   "default": "USD",
+   "fieldname": "currency",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "original_currency",
+   "fieldtype": "Link",
+   "label": "Original Currency",
+   "options": "Currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "original_amount",
+   "fieldtype": "Currency",
+   "label": "Original Amount",
+   "options": "original_currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "exchange_rate_snapshot",
+   "fieldtype": "Float",
+   "label": "Exchange Rate Snapshot",
+   "precision": "9",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_request",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "sarea_user_id",
+   "fieldtype": "Int",
+   "hidden": 1,
+   "in_standard_filter": 1,
+   "label": "Sarea User ID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Customer",
+   "options": "Customer",
+   "read_only": 1
+  },
+  {
+   "fieldname": "payment_method",
+   "fieldtype": "Data",
+   "label": "Payment Method",
+   "read_only": 1
+  },
+  {
+   "fieldname": "mode_of_payment",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "ERPNext Mode of Payment",
+   "options": "Mode of Payment"
+  },
+  {
+   "fieldname": "reference",
+   "fieldtype": "Data",
+   "label": "Reference",
+   "read_only": 1
+  },
+  {
+   "fieldname": "blog_id",
+   "fieldtype": "Int",
+   "hidden": 1,
+   "label": "Origin Blog ID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "sarea_created_at",
+   "fieldtype": "Datetime",
+   "label": "Created At (Sarea)",
+   "read_only": 1
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Sarea Notes",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "payment_entry_section",
+   "fieldtype": "Section Break",
+   "label": "More Info"
+  },
+  {
+   "default": "0",
+   "fieldname": "payment_entry_created",
+   "fieldtype": "Check",
+   "label": "Payment Entry Created",
+   "read_only": 1
+  },
+  {
+   "fieldname": "decision_section",
+   "fieldtype": "Section Break",
+   "label": "ERPNext Decision"
+  },
+  {
+   "default": "Not Started",
+   "fieldname": "decision_state",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Decision State",
+   "options": "Not Started\nSending\nRetry Required\nCompleted\nConflict\nError",
+   "read_only": 1
+  },
+  {
+   "fieldname": "decision",
+   "fieldtype": "Select",
+   "label": "Decision",
+   "options": "\napprove\nreject",
+   "read_only": 1
+  },
+  {
+   "fieldname": "decision_notes",
+   "fieldtype": "Small Text",
+   "label": "Decision Reason / Notes",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_decision",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "decision_by",
+   "fieldtype": "Link",
+   "label": "Decision By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "decision_started_at",
+   "fieldtype": "Datetime",
+   "label": "Decision Started At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "decision_completed_at",
+   "fieldtype": "Datetime",
+   "label": "Decision Completed At",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "decision_attempts",
+   "fieldtype": "Int",
+   "label": "Decision Attempts",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "integration_section",
+   "fieldtype": "Section Break",
+   "label": "Wallet Result"
+  },
+  {
+   "fieldname": "transaction_id",
+   "fieldtype": "Int",
+   "label": "Transaction ID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "voucher_number",
+   "fieldtype": "Data",
+   "label": "Voucher Number",
+   "read_only": 1
+  },
+  {
+   "fieldname": "balance_after",
+   "fieldtype": "Currency",
+   "label": "Balance After",
+   "options": "currency",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "idempotent_replay",
+   "fieldtype": "Check",
+   "label": "Idempotent Replay",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_integration",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "last_http_status",
+   "fieldtype": "Int",
+   "label": "Last HTTP Status",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_response_code",
+   "fieldtype": "Data",
+   "label": "Last Response Code",
+   "read_only": 1
+  },
+  {
+   "fieldname": "retry_after",
+   "fieldtype": "Data",
+   "label": "Retry-After",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_sync_on",
+   "fieldtype": "Datetime",
+   "label": "Last Sync On",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "technical_section",
+   "fieldtype": "Section Break",
+   "label": "Technical / Audit"
+  },
+  {
+   "fieldname": "decision_idempotency_key",
+   "fieldtype": "Data",
+   "label": "Idempotency Key",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "decision_payload",
+   "fieldtype": "Code",
+   "label": "Exact Decision Payload",
+   "no_copy": 1,
+   "options": "JSON",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_response_json",
+   "fieldtype": "Code",
+   "label": "Last API Response",
+   "no_copy": 1,
+   "options": "JSON",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_error",
+   "fieldtype": "Text",
+   "label": "Last Integration Error",
+   "read_only": 1
+  },
+  {
+   "fieldname": "internal_notes",
+   "fieldtype": "Small Text",
+   "label": "Internal ERPNext Notes"
+  },
+  {
+   "fieldname": "column_break_zanc",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "column_break_3jyg",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "column_break_jmud",
+   "fieldtype": "Column Break"
+  }
+ ],
+ "links": [],
+ "modified": "2026-10-23 00:50:48.118185",
+ "modified_by": "akram.mutaher.a@gmail.com",
+ "module": "WooCommerce",
+ "name": "Sarea Wallet Charge Request",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Accounts User"
+  },
+  {
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Accounts Manager",
+   "write": 1
+  },
+  {
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "search_fields": "charge_request_id,reference,sarea_user_id,status",
+ "sort_field": "sarea_created_at",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "customer",
+ "track_changes": 1
+}

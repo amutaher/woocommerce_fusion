@@ -1,0 +1,146 @@
+{
+ "actions": [],
+ "creation": "2026-09-28 20:38:31.760730",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "connection_section",
+  "enabled",
+  "base_url",
+  "column_break_1",
+  "consumer_key",
+  "consumer_secret",
+  "behavior_section",
+  "timeout_seconds",
+  "verify_ssl",
+  "sync_page_size",
+  "payment_entry_section",
+  "company",
+  "require_payment_entry_before_approve",
+  "payment_entry_remarks_template",
+  "payment_methods_section",
+  "payment_method_mappings"
+ ],
+ "fields": [
+  {
+   "fieldname": "connection_section",
+   "fieldtype": "Section Break",
+   "label": "Connection"
+  },
+  {
+   "default": "0",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled"
+  },
+  {
+   "description": "Example: https://store.example.com/wp-json/sarea-wallet/v1",
+   "fieldname": "base_url",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Base URL",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "consumer_key",
+   "fieldtype": "Password",
+   "in_list_view": 1,
+   "label": "Consumer Key",
+   "reqd": 1
+  },
+  {
+   "fieldname": "consumer_secret",
+   "fieldtype": "Password",
+   "in_list_view": 1,
+   "label": "Consumer Secret",
+   "reqd": 1
+  },
+  {
+   "fieldname": "behavior_section",
+   "fieldtype": "Section Break",
+   "label": "Behavior"
+  },
+  {
+   "default": "30",
+   "fieldname": "timeout_seconds",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Timeout Seconds",
+   "reqd": 1
+  },
+  {
+   "default": "1",
+   "fieldname": "verify_ssl",
+   "fieldtype": "Check",
+   "label": "Verify SSL"
+  },
+  {
+   "default": "100",
+   "description": "API maximum is 100.",
+   "fieldname": "sync_page_size",
+   "fieldtype": "Int",
+   "label": "Sync Page Size",
+   "reqd": 1
+  },
+  {
+   "fieldname": "payment_entry_section",
+   "fieldtype": "Section Break",
+   "label": "Payment Entry"
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company"
+  },
+  {
+   "default": "0",
+   "fieldname": "require_payment_entry_before_approve",
+   "fieldtype": "Check",
+   "label": "Require Payment Entry Before Approve",
+   "description": "When enabled, Approve is blocked until one matching non-cancelled Payment Entry exists for the Charge Request."
+  },
+  {
+   "default": "Received payment for Sarea Wallet Charge Request {{ name }} (ID {{ charge_request_id }}) from {{ customer }}. Amount: {{ amount_usd }} {{ currency }}. Reference: {{ reference or '-' }}. Notes: {{ notes or '-' }}",
+   "description": "Jinja template. Use direct Charge Request fields such as {{ amount_usd }}, {{ customer }}, {{ payment_method }}, or conditions such as {% if payment_method == \"bank_transfer\" %}...{% endif %}. You may also use doc.fieldname, for example {{ doc.reference }}.",
+   "fieldname": "payment_entry_remarks_template",
+   "fieldtype": "Small Text",
+   "label": "Payment Entry Remarks Template"
+  },
+  {
+   "fieldname": "payment_methods_section",
+   "fieldtype": "Section Break",
+   "label": "Payment Methods Mapping"
+  },
+  {
+   "fieldname": "payment_method_mappings",
+   "fieldtype": "Table",
+   "label": "Payment Methods Mapping",
+   "options": "Sarea Wallet Payment Method Mapping"
+  }
+ ],
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-09-28 21:08:43.721917",
+ "modified_by": "akram.mutaher.a@gmail.com",
+ "module": "WooCommerce",
+ "name": "Sarea Wallet Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

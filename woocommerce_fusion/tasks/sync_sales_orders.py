@@ -1330,3 +1330,68 @@ def get_addresses_linking_to(doctype, docname, fields=None):
 			["Dynamic Link", "link_name", "=", docname],
 		],
 	)
+
+@frappe.whitelist()
+def enqueue_manual_woocommerce_order_sync():
+	"""
+	Manually queue the same WooCommerce order catch-up synchronization
+	used by the hourly scheduler.
+
+	Intended for Sales Managers when a WooCommerce webhook may have
+	failed or when they do not want to wait for the next hourly run.
+
+	This does NOT perform the synchronization inside the HTTP request.
+	It queues the existing scheduled method on the long queue.
+	"""
+
+	allowed_roles = {
+		"Sales Manager",
+		"System Manager",
+	}
+
+	user_roles = set(
+		frappe.get_roles(
+			frappe.session.user
+		)
+	)
+
+	if (
+		frappe.session.user != "Administrator"
+		and not allowed_roles.intersection(
+			user_roles
+		)
+	):
+		frappe.throw(
+			_(
+				"You do not have permission to manually "
+				"synchronize WooCommerce orders."
+			),
+			frappe.PermissionError,
+		)
+
+	wc_settings = frappe.get_cached_doc(
+		"WooCommerce Integration Settings"
+	)
+
+	last_sync_date = (
+		wc_settings.wc_last_sync_date
+	)
+
+	job_id = (
+		"woocommerce-manual-order-catchup"
+	)
+
+	frappe.enqueue(
+		"woocommerce_fusion.tasks.sync_sales_orders."
+		"sync_woocommerce_orders_modified_since",
+		queue="long",
+		timeout=1800,
+		job_id=job_id,
+		deduplicate=True,
+	)
+
+	return {
+		"queued": True,
+		"job_id": job_id,
+		"last_sync_date": last_sync_date,
+	}

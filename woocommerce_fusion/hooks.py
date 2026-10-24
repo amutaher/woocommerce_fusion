@@ -179,10 +179,25 @@ scheduler_events = {
 		"woocommerce_fusion.tasks.sync_items.sync_woocommerce_products_modified_since",
         "woocommerce_fusion.tasks.order_status_sync.reconcile_recent_sales_order_statuses",
 	],
-	"daily_long": [
-		"woocommerce_fusion.tasks.stock_update.update_stock_levels_for_all_enabled_items_in_background",
-		"woocommerce_fusion.tasks.sync_item_prices.run_item_price_sync_in_background",
-	],
+	#"daily_long": [
+	#	"woocommerce_fusion.tasks.stock_update.update_stock_levels_for_all_enabled_items_in_background",
+	#	"woocommerce_fusion.tasks.sync_item_prices.run_item_price_sync_in_background",
+	#],
+    "cron": {
+		"5 2 * * *": [
+			"woocommerce_fusion.tasks.stock_update.update_stock_levels_for_all_enabled_items_in_background",
+		],
+		"5 3 * * *": [
+			"woocommerce_fusion.tasks.sync_item_prices.run_item_price_sync_in_background",
+		],
+        "*/5 * * * *": [
+        	"woocommerce_fusion.sarea_wallet.sync.scheduled_sync_pending_charge_requests",
+            "woocommerce_fusion.sarea_wallet.sync.scheduled_refresh_pending_charge_requests",
+    	],
+        #"2 * * * *": [
+		#	"woocommerce_fusion.tasks.sync_items.sync_woocommerce_products_modified_since",
+		#],
+	},
 	# 	"monthly": [
 	# 		"woocommerce_fusion.tasks.monthly"
 	# 	],
