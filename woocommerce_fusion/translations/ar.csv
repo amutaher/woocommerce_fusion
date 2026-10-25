@@ -1,5 +1,4 @@
 ﻿Sarea Wallet Charge Request,طلب شحن رصيد
-Sarea Charge Request,طلب شحن سارع
 Charge Request ID,معرّف طلب الشحن
 Sarea Status,حالة سارع
 Original Currency,العملة الأصلية
@@ -9,7 +8,7 @@ Sarea User ID,معرّف مستخدم سارع
 Payment Method,طريقة الدفع
 Origin Blog ID,معرّف المتجر المصدر
 Created At (Sarea),تاريخ الإنشاء في سارع
-Payment Entry Created,تم إنشاء قيد الدفع
+Payment Entry Created,تم انشاء سند القبض
 ERPNext Decision,قرار ERPNext
 Decision State,حالة القرار
 Decision,القرار

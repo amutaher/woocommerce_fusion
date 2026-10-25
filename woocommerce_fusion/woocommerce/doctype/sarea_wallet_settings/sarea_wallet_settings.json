@@ -99,10 +99,10 @@
   },
   {
    "default": "0",
+   "description": "When enabled, Approve is blocked until one matching non-cancelled Payment Entry exists for the Charge Request.",
    "fieldname": "require_payment_entry_before_approve",
    "fieldtype": "Check",
-   "label": "Require Payment Entry Before Approve",
-   "description": "When enabled, Approve is blocked until one matching non-cancelled Payment Entry exists for the Charge Request."
+   "label": "Require Payment Entry Before Approve"
   },
   {
    "default": "Received payment for Sarea Wallet Charge Request {{ name }} (ID {{ charge_request_id }}) from {{ customer }}. Amount: {{ amount_usd }} {{ currency }}. Reference: {{ reference or '-' }}. Notes: {{ notes or '-' }}",
@@ -125,7 +125,7 @@
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-09-28 21:08:43.721917",
+ "modified": "2026-10-25 02:38:14.903844",
  "modified_by": "akram.mutaher.a@gmail.com",
  "module": "WooCommerce",
  "name": "Sarea Wallet Settings",

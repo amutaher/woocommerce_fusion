@@ -4,7 +4,7 @@ from decimal import Decimal, InvalidOperation
 import time
 
 import frappe
-from frappe.utils import now_datetime
+from frappe.utils import get_datetime, now_datetime
 
 from woocommerce_fusion.sarea_wallet.api import SareaWalletAPI, SareaWalletAPIError
 
@@ -126,6 +126,7 @@ def _get_mode_of_payment_from_mapping(payment_method, currency):
 
 def upsert_charge_request(row):
     remote_id = int(row["id"])
+    sync_time = now_datetime()
 
     name = frappe.db.get_value(
         "Sarea Wallet Charge Request",
@@ -153,29 +154,37 @@ def upsert_charge_request(row):
         )
     )
 
+    amount_usd = _money(
+        row.get("amount")
+    )
+
     values = {
         "charge_request_id": remote_id,
         "sarea_user_id": sarea_user_id,
         "customer": _get_customer_by_sarea_user_id(
             sarea_user_id
         ),
-        "amount_usd": _money(
-            row.get("amount")
+        # Frappe numeric fields are loaded as normal Python numeric values.
+        # Convert API Decimal values before the simple equality check.
+        "amount_usd": (
+            float(amount_usd)
+            if amount_usd is not None
+            else None
         ),
         "currency": currency,
         "payment_method": payment_method,
         "reference": row.get("reference"),
         "status": row.get("status"),
         "blog_id": row.get("blog_id"),
-        "sarea_created_at": row.get(
-            "created_at"
+        # API sends a string; Frappe loads Datetime fields as datetime.
+        "sarea_created_at": (
+            get_datetime(row.get("created_at"))
+            if row.get("created_at")
+            else None
         ),
-        "last_sync_on": now_datetime(),
     }
 
-    # These fields are optional in the API. Only update ERPNext when the
-    # response actually contains them, so an older/list response cannot erase
-    # richer data previously received from the detail endpoint.
+    # Optional API fields are updated only when present in the response.
     if "original_currency" in row:
         values["original_currency"] = (
             original_currency
@@ -186,7 +195,7 @@ def upsert_charge_request(row):
             row.get("original_amount")
         )
         if original_amount is not None:
-            values["original_amount"] = (
+            values["original_amount"] = float(
                 original_amount
             )
 
@@ -197,7 +206,9 @@ def upsert_charge_request(row):
         if exchange_rate_snapshot is not None:
             values[
                 "exchange_rate_snapshot"
-            ] = exchange_rate_snapshot
+            ] = float(
+                exchange_rate_snapshot
+            )
 
     if "notes" in row:
         values["notes"] = (
@@ -220,15 +231,33 @@ def upsert_charge_request(row):
                 "mode_of_payment"
             ] = mapped_mode_of_payment
 
-        doc.update(values)
-        doc.flags.from_sarea_wallet_sync = True
-        doc.save(ignore_permissions=True)
+        # Save only if at least one synchronized value has changed.
+        has_changes = any(
+            doc.get(fieldname) != value
+            for fieldname, value in values.items()
+        )
+
+        if has_changes:
+            doc.update(values)
+            doc.flags.from_sarea_wallet_sync = True
+            doc.save(ignore_permissions=True)
+
+        # Always record the successful sync time silently.
+        frappe.db.set_value(
+            "Sarea Wallet Charge Request",
+            name,
+            "last_sync_on",
+            sync_time,
+            update_modified=False,
+        )
 
     else:
         if mapped_mode_of_payment:
             values[
                 "mode_of_payment"
             ] = mapped_mode_of_payment
+
+        values["last_sync_on"] = sync_time
 
         doc = frappe.get_doc(
             {

@@ -168,12 +168,13 @@ doc_events = {
 # ---------------
 
 scheduler_events = {
-	# 	"all": [
-	# 		"woocommerce_fusion.tasks.all"
-	# 	],
-	# 	"weekly": [
-	# 		"woocommerce_fusion.tasks.daily"
-	# 	],
+	"all": [
+		"woocommerce_fusion.sarea_wallet.sync.scheduled_sync_pending_charge_requests",
+		"woocommerce_fusion.sarea_wallet.sync.scheduled_refresh_pending_charge_requests",
+	],
+	#"weekly": [
+	#	"woocommerce_fusion.tasks.daily"
+	#],
 	"hourly_long": [
 		"woocommerce_fusion.tasks.sync_sales_orders.sync_woocommerce_orders_modified_since",
 		"woocommerce_fusion.tasks.sync_items.sync_woocommerce_products_modified_since",
@@ -190,17 +191,17 @@ scheduler_events = {
 		"5 3 * * *": [
 			"woocommerce_fusion.tasks.sync_item_prices.run_item_price_sync_in_background",
 		],
-        "*/5 * * * *": [
-        	"woocommerce_fusion.sarea_wallet.sync.scheduled_sync_pending_charge_requests",
-            "woocommerce_fusion.sarea_wallet.sync.scheduled_refresh_pending_charge_requests",
-    	],
+        #"*/5 * * * *": [
+        #	"woocommerce_fusion.sarea_wallet.sync.scheduled_sync_pending_charge_requests",
+        #    "woocommerce_fusion.sarea_wallet.sync.scheduled_refresh_pending_charge_requests",
+    	#],
         #"2 * * * *": [
 		#	"woocommerce_fusion.tasks.sync_items.sync_woocommerce_products_modified_since",
 		#],
 	},
-	# 	"monthly": [
-	# 		"woocommerce_fusion.tasks.monthly"
-	# 	],
+	#"monthly": [
+	#	"woocommerce_fusion.tasks.monthly"
+	#],
 }
 
 # Testing
